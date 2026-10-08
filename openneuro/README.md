@@ -54,6 +54,19 @@ bash download-openneuro.sh -o /data/openneuro ds002721
 <https://raw.githubusercontent.com/Omni-NCC/scripts/main/openneuro/download-openneuro.py>
 
 下载使用容器中的 `curl`，宿主机无需安装 curl 或 Python。脚本目录须可写，容器须能访问 GitHub。下载成功且通过 Python 语法检查后才安装文件；下载失败、空文件或语法错误会停止运行并清理临时文件。已有文件不会被自动更新。GitHub 上可下载的是已推送到 `main` 的版本，本地未推送的改动不会包含在内。
+## 通过 curl 调用
+
+在 Linux 服务器上执行（分支为 `main`）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Omni-NCC/scripts/main/openneuro/download-openneuro.sh | bash -s -- \
+  -o /home/lapluis/workspace/dataset-collection \
+  -p 4 -j 4 \
+  ds004789 ds004809 ds005059 ds005670
+```
+
+管道模式将 Python 脚本保存到输出目录的 `.openneuro-tools/download-openneuro.py`，首次下载，以后复用；已有 Python 脚本不会自动更新。指定版本仍可使用 `ds002721v1.0.3`。宿主机需要 curl；容器和运行时要求不变。此调用方式需先将支持管道执行的改动推送到 GitHub。
+
 ## 参数
 
 ```text

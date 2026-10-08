@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Usage: bash download-openneuro.sh [-o OUTPUT] [-j JOBS] [-p DATASET_JOBS] ds002721 [ds003505v1.1.2 ...]
 set -euo pipefail
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+script_dir=''
+if [[ -n ${BASH_SOURCE[0]:-} ]]; then
+    script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+fi
 image=${OPENNEURO_CONTAINER:-/home/container/download-tools.sif}
 output=$PWD
 jobs=4
@@ -37,6 +40,11 @@ runtime=$(command -v apptainer || command -v singularity) || {
 }
 mkdir -p -- "$output"
 output=$(cd -- "$output" && pwd)
+# stdin execution has no script path; keep the worker with the output.
+if [[ -z $script_dir ]]; then
+    script_dir="$output/.openneuro-tools"
+    mkdir -p -- "$script_dir"
+fi
 # Bind specifications cannot safely represent these path characters.
 [[ $output != *:* && $output != *,* && $script_dir != *:* && $script_dir != *,* ]] || {
     echo 'Output/script paths must not contain commas or colons.' >&2; exit 2;
@@ -52,14 +60,14 @@ if [[ ! -e $worker && ! -L $worker ]]; then
     # Use curl and Python from the image; the host only needs Bash and the runtime.
     "$runtime" exec --bind "$script_dir:/download-bootstrap" "$image" \
         curl --fail --location --retry 3 --connect-timeout 20 --max-time 300 \
-        --output "/download-bootstrap/$(basename -- "$temporary_worker")" "$worker_url" || {
+        --output "/download-bootstrap/$(basename -- "$temporary_worker")" "$worker_url" </dev/null || {
         echo 'Failed to download Python worker; no worker was installed.' >&2
         exit 1
     }
     [[ -s $temporary_worker ]] || { echo 'Downloaded Python worker is empty.' >&2; exit 1; }
     "$runtime" exec --bind "$script_dir:/download-bootstrap:ro" "$image" \
         python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))' \
-        "/download-bootstrap/$(basename -- "$temporary_worker")" || {
+        "/download-bootstrap/$(basename -- "$temporary_worker")" </dev/null || {
         echo 'Downloaded Python worker is not valid Python; no worker was installed.' >&2
         exit 1
     }
@@ -76,4 +84,4 @@ fi
 exec "$runtime" exec \
     --bind "$output:/downloads" --bind "$script_dir:/download-script:ro" \
     --pwd /downloads "$image" \
-    python3 -B /download-script/download-openneuro.py --jobs "$jobs" --dataset-jobs "$dataset_jobs" "$@"
+    python3 -B /download-script/download-openneuro.py --jobs "$jobs" --dataset-jobs "$dataset_jobs" "$@" </dev/null

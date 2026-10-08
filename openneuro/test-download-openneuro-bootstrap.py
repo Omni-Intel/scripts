@@ -27,7 +27,7 @@ sys.exit(0)
 
 
 class BootstrapTests(unittest.TestCase):
-    def check_case(self, mode='ok', local=False, parallel=1):
+    def check_case(self, mode='ok', local=False, parallel=1, piped=False):
         with tempfile.TemporaryDirectory(prefix='bootstrap test ') as tmp:
             root = Path(tmp)
             shell = root / 'download-openneuro.sh'
@@ -37,16 +37,19 @@ class BootstrapTests(unittest.TestCase):
             runtime.chmod(0o755)
             image = root / 'test.sif'
             image.touch()
-            worker = root / 'download-openneuro.py'
+            worker_dir = root / 'output' / '.openneuro-tools' if piped else root
+            worker_dir.mkdir(parents=True, exist_ok=True)
+            worker = worker_dir / 'download-openneuro.py'
             if local:
                 worker.write_text('# local worker\n')
             calls = root / 'calls'
             env = dict(os.environ, PATH=str(root) + ':' + os.environ['PATH'],
                        OPENNEURO_CONTAINER=str(image), CALLS=str(calls), DOWNLOAD_MODE=mode, EXPECTED_DATASET_JOBS=str(parallel))
-            result = subprocess.run(['bash', str(shell), '-o', str(root / 'output'), '-p', str(parallel), 'ds002721'],
-                                    env=env, text=True, capture_output=True)
+            result = subprocess.run(['bash', *(['-s', '--'] if piped else [str(shell)]), '-o', str(root / 'output'), '-p', str(parallel), 'ds002721'],
+                                    env=env, text=True, capture_output=True,
+                                    input=shell.read_text() if piped else None)
             invocations = calls.read_text().splitlines()
-            self.assertEqual(list(root.glob('.download-openneuro.py.*')), [])
+            self.assertEqual(list(worker_dir.glob('.download-openneuro.py.*')), [])
             if local:
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(worker.read_text(), '# local worker\n')
@@ -59,6 +62,15 @@ class BootstrapTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(worker.exists())
                 self.assertNotIn('worker', invocations)
+
+    def test_stdin_downloads_worker(self):
+        self.check_case(piped=True, parallel=4)
+
+    def test_stdin_reuses_worker(self):
+        self.check_case(piped=True, local=True)
+
+    def test_stdin_failed_download_is_cleaned(self):
+        self.check_case(piped=True, mode='fail')
 
     def test_existing_worker_is_untouched(self):
         self.check_case(local=True)
