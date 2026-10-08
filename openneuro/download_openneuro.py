@@ -1,7 +1,12 @@
 """Resumable OpenNeuro downloader; run through download-openneuro.sh."""
 import argparse
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import fcntl
+from datetime import datetime
+from functools import wraps
+import threading
+import time
 import hashlib
 import json
 import os
@@ -19,10 +24,50 @@ RECEIPT = '.openneuro-download.json'
 PHASES = ('resolve', 'clone', 'get', 'verify', 'materialize', 'cleanup', 'publish', 'complete')
 
 
-def run(args, cwd):
-    print('+ ' + shlex.join(map(str, args)), flush=True)
-    subprocess.run(args, cwd=cwd, check=True)
+_LOG_CONTEXT = threading.local()
+_LOG_LOCK = threading.Lock()
 
+
+def log(message, event='INFO', spec=None):
+    dataset = spec or getattr(_LOG_CONTEXT, 'spec', None) or '-'
+    timestamp = datetime.now().astimezone().isoformat(timespec='seconds')
+    clean = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', str(message))
+    for line in clean.splitlines() or ['']:
+        with _LOG_LOCK:
+            print(f'[{timestamp}] [{dataset}] [{event}] {line}', flush=True)
+
+
+def dataset_logging(function):
+    @wraps(function)
+    def wrapped(spec, *args, **kwargs):
+        previous = getattr(_LOG_CONTEXT, 'spec', None)
+        _LOG_CONTEXT.spec = spec
+        try:
+            return function(spec, *args, **kwargs)
+        finally:
+            _LOG_CONTEXT.spec = previous
+    return wrapped
+
+
+def run(args, cwd):
+    log(shlex.join(map(str, args)), 'COMMAND')
+    env = dict(os.environ, PYTHONUNBUFFERED='1', NO_COLOR='1')
+    with subprocess.Popen(args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, errors='replace', bufsize=1, env=env) as process:
+        try:
+            for line in process.stdout:
+                log(line.rstrip('\r\n'), 'OUTPUT')
+            returncode = process.wait()
+        except BaseException:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            raise
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, args)
 
 def sync_dir(path):
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
@@ -210,6 +255,7 @@ def check_repo(dataset, state):
     return head
 
 
+@dataset_logging
 def download(spec, output, jobs, cli=CLI):
     match = re.fullmatch(r'(ds[0-9]{6})(?:v([0-9]+\.[0-9]+\.[0-9]+))?', spec)
     if not match:
@@ -237,12 +283,29 @@ def download(spec, output, jobs, cli=CLI):
                      'version': requested_version, 'phase': 'resolve', 'run_id': uuid.uuid4().hex}
             write_json(state_path, state)
 
-        def phase(value):
-            state['phase'] = value
-            write_json(state_path, state)
+        active_phase = state['phase']
+        phase_started = time.monotonic()
+        dataset_started = phase_started
+
+        def phase(value, completed=True):
+            nonlocal active_phase, phase_started
+            next_state = dict(state, phase=value)
+            write_json(state_path, next_state)
+            state.update(next_state)
+            if completed:
+                log(f'phase={active_phase} elapsed={time.monotonic() - phase_started:.1f}s '
+                    f'version={state["version"]}', 'DONE')
+                active_phase = value
+                phase_started = time.monotonic()
+                if value != 'complete':
+                    log(f'phase={value} version={state["version"]}', 'START')
 
         dataset = stage / accession
-        print(f"{spec}: resuming phase={state['phase']}, version={state['version']}", flush=True)
+        log(f'phase={active_phase} version={state["version"]} state={state_path}', 'RESUME')
+        if active_phase != 'complete':
+            log(f'phase={active_phase} version={state["version"]}', 'START')
+        else:
+            log('Already completed; checking receipt only', 'SKIP')
         try:
             if os.path.lexists(destination) and state['phase'] not in ('publish', 'complete'):
                 raise FileExistsError(f'Refusing to overwrite: {destination}')
@@ -268,7 +331,7 @@ def download(spec, output, jobs, cli=CLI):
                     run(['git', 'annex', 'fsck', '--numcopies=1'], dataset)
                 except subprocess.CalledProcessError:
                     # fsck may quarantine a corrupt object. Retry get next time.
-                    phase('get')
+                    phase('get', completed=False)
                     raise
                 manifest = inventory(dataset)
                 tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=dataset)
@@ -303,9 +366,10 @@ def download(spec, output, jobs, cli=CLI):
                 validate_export(destination, manifest)
                 phase('complete')
             validate_receipt(destination, state)
-            print(f"COMPLETE: {destination} (version {state['version']})", flush=True)
-        except BaseException:
-            print(f'Resume with the same command. Saved state: {stage}', flush=True)
+            log(f"version={state['version']} output={destination} elapsed={time.monotonic() - dataset_started:.1f}s", 'COMPLETE')
+        except BaseException as error:
+            log(f'phase={active_phase} elapsed={time.monotonic() - phase_started:.1f}s '
+                f'error={type(error).__name__}: {error}; resume_phase={state["phase"]}; state={stage}', 'FAILED')
             raise
 
 
@@ -405,28 +469,47 @@ def prepare_cli(output):
             write_json(marker, identity)
         runtime_cli = writable_cli(executable, cache, identity)
     os.environ['DENO_DIR'] = str(cache)
-    print(f'OpenNeuro CLI: {version} ({executable})', flush=True)
+    log(f'OpenNeuro CLI: {version} ({executable})')
     return runtime_cli
+
+def download_batch(specs, output, jobs, dataset_jobs, cli):
+    """Bound the number of active dataset pipelines; each keeps its own state/lock."""
+    if dataset_jobs < 1 or jobs < 1:
+        raise ValueError('Concurrency values must be positive')
+    specs = list(dict.fromkeys(specs))
+    failed = set()
+    pool = ThreadPoolExecutor(max_workers=dataset_jobs, thread_name_prefix='dataset')
+    futures = {}
+    try:
+        futures = {pool.submit(download, spec, output, jobs, cli=cli): spec for spec in specs}
+        for future in as_completed(futures):
+            spec = futures[future]
+            try:
+                future.result()
+            except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
+                log(str(error), 'DATASET_FAILED', spec=spec)
+                failed.add(spec)
+    finally:
+        # Do not start queued datasets after an interrupt/unexpected exception.
+        pool.shutdown(wait=True, cancel_futures=True)
+    return [spec for spec in specs if spec in failed]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--jobs', type=int, default=4)
+    parser.add_argument('--dataset-jobs', type=int, default=1)
     parser.add_argument('datasets', nargs='+')
     args = parser.parse_args()
-    if args.jobs < 1:
-        parser.error('--jobs must be positive')
+    if args.jobs < 1 or args.dataset_jobs < 1:
+        parser.error('--jobs and --dataset-jobs must be positive')
     output = Path.cwd().resolve()
     cli = prepare_cli(output)
 
-    failed = []
-    for spec in dict.fromkeys(args.datasets):
-        try:
-            download(spec, output, args.jobs, cli=cli)
-        except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
-            print(f'FAILED {spec}: {error}', flush=True)
-            failed.append(spec)
-    if failed:
-        print('Failed datasets: ' + ' '.join(failed), flush=True)
+    log(f'Concurrency: {args.dataset_jobs} datasets, {args.jobs} file transfers per dataset', 'BATCH_START')
+    failed = download_batch(args.datasets, output, args.jobs, args.dataset_jobs, cli)
+
+    log(f'total={len(set(args.datasets))} succeeded={len(set(args.datasets)) - len(failed)} '
+        f"failed={len(failed)} failed_ids={','.join(failed) or 'none'}", 'BATCH_DONE')
     return bool(failed)
 
 

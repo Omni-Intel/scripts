@@ -1,5 +1,10 @@
 """Container integration tests with synthetic annex data; no OpenNeuro downloads."""
 import json
+import io
+import sys
+from contextlib import redirect_stdout
+import threading
+import time
 from pathlib import Path
 import subprocess
 import tempfile
@@ -188,6 +193,29 @@ class DownloadTests(unittest.TestCase):
             self.invoke()
         self.assertTrue((repo / '.git').is_dir())
 
+    def test_stage_completion_logs(self):
+        with patch.object(worker, 'log') as logger:
+            self.invoke()
+        completed = [c.args[0].split()[0] for c in logger.call_args_list
+                     if len(c.args) > 1 and c.args[1] == 'DONE']
+        self.assertEqual(completed, ['phase=' + p for p in worker.PHASES[:-1]])
+        with patch.object(worker, 'log') as logger:
+            self.invoke()
+        self.assertFalse(any(len(c.args) > 1 and c.args[1] == 'DONE' for c in logger.call_args_list))
+        self.assertTrue(any(len(c.args) > 1 and c.args[1] == 'SKIP' for c in logger.call_args_list))
+
+    def test_failed_verification_is_not_logged_as_done(self):
+        def fail(args, cwd):
+            if args[:3] == ['git', 'annex', 'fsck']:
+                raise subprocess.CalledProcessError(1, args)
+            return self.fixture(args, cwd)
+        with patch.object(worker, 'run', fail), patch.object(worker, 'log') as logger:
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.invoke()
+        messages = [(c.args[1], c.args[0]) for c in logger.call_args_list if len(c.args) > 1]
+        self.assertFalse(any(event == 'DONE' and message.startswith('phase=verify ') for event, message in messages))
+        self.assertTrue(any(event == 'FAILED' and 'phase=verify ' in message and 'resume_phase=get' in message
+                            for event, message in messages))
     def test_invalid_links(self):
         repo = self.root / 'data'
         repo.mkdir()
@@ -264,6 +292,58 @@ class InstalledCliTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'no openneuro executable'):
                 worker.prepare_cli(Path(tmp))
             probe.assert_not_called()
+
+class DatasetParallelTests(unittest.TestCase):
+    def test_parallel_limit_dedup_and_failure_isolation(self):
+        guard = threading.Lock()
+        barrier = threading.Barrier(2)
+        active = 0
+        peak = 0
+        calls = []
+        def fake_download(spec, output, jobs, cli):
+            nonlocal active, peak
+            with guard:
+                active += 1
+                peak = max(peak, active)
+                calls.append((spec, jobs, cli))
+            try:
+                if spec in ('ds000001', 'ds000002'):
+                    barrier.wait(timeout=5)
+                time.sleep(0.02)
+                if spec == 'ds000002':
+                    raise RuntimeError('simulated failure')
+            finally:
+                with guard:
+                    active -= 1
+        with patch.object(worker, 'download', fake_download):
+            failed = worker.download_batch(['ds000001', 'ds000002', 'ds000001', 'ds000003'],
+                                           Path('/tmp'), 4, 2, 'openneuro')
+        self.assertEqual(peak, 2)
+        self.assertEqual(failed, ['ds000002'])
+        self.assertEqual(sorted(calls), [(s, 4, 'openneuro') for s in
+                                       ['ds000001', 'ds000002', 'ds000003']])
+
+    def test_default_sequential_order_and_invalid_limit(self):
+        with patch.object(worker, 'download') as download:
+            self.assertEqual(worker.download_batch(['ds000002', 'ds000001'], Path('/tmp'), 4, 1, 'openneuro'), [])
+            self.assertEqual([c.args[0] for c in download.call_args_list], ['ds000002', 'ds000001'])
+            with self.assertRaises(ValueError):
+                worker.download_batch(['ds000001'], Path('/tmp'), 4, 0, 'openneuro')
+
+class LogOutputTests(unittest.TestCase):
+    def test_command_output_is_tagged_and_errors_propagate(self):
+        @worker.dataset_logging
+        def command(spec):
+            worker.run([sys.executable, '-c',
+                        'import sys; print("hello", flush=True); print("problem", file=sys.stderr); sys.exit(3)'], Path('/tmp'))
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(subprocess.CalledProcessError):
+            command('ds000001')
+        lines = output.getvalue().splitlines()
+        self.assertTrue(all('[ds000001]' in line for line in lines))
+        self.assertTrue(any('[OUTPUT] hello' in line for line in lines))
+        self.assertTrue(any('[OUTPUT] problem' in line for line in lines))
+        self.assertRegex(lines[0], r'^\[\d{4}-\d{2}-\d{2}T')
 
 if __name__ == '__main__':
     unittest.main()

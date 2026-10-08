@@ -57,7 +57,7 @@ bash download-openneuro.sh -o /data/openneuro ds002721
 ## 参数
 
 ```text
-bash download-openneuro.sh [-o OUTPUT] [-j JOBS] ID [ID ...]
+bash download-openneuro.sh [-o OUTPUT] [-j JOBS] [-p DATASET_JOBS] ID [ID ...]
 ```
 
 所有选项放在第一个 ID 前面。
@@ -65,7 +65,8 @@ bash download-openneuro.sh [-o OUTPUT] [-j JOBS] ID [ID ...]
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `-o` / `--output` | 调用时的当前目录 | 输出目录，不存在时创建 |
-| `-j` / `--jobs` | `4` | DataLad 下载并发数，必须为正整数；数据集之间仍顺序执行 |
+| `-j` / `--jobs` | `4` | 每个数据集内的文件下载并发数，必须为正整数 |
+| `-p` / `--dataset-jobs` | `1` | 同时处理的数据集数，必须为正整数；默认顺序执行 |
 | `-h` / `--help` | — | 显示帮助 |
 
 替换容器路径：
@@ -77,6 +78,20 @@ OPENNEURO_CONTAINER=/path/to/download-tools.sif \
 
 脚本目录和输出目录不能含逗号或冒号，含空格的路径须加引号。默认连接 `https://openneuro.org`；若设置 `OPENNEURO_URL`，恢复时须保持同一地址。需要认证时，通过 `OPENNEURO_API_KEY` 环境变量提供密钥，版本查询和 CLI 均可使用它；不要把密钥写进脚本或提交到 Git。
 
+## 数据集并行
+
+`-p` 控制同时处理的数据集数量，`-j` 控制每个数据集内部的文件下载并发。以下命令同时处理四个数据集，每个最多四路文件传输，总计最多约 16 路：
+
+```bash
+bash download-openneuro.sh \
+  -o /home/lapluis/workspace/dataset-collection \
+  -p 4 -j 4 \
+  ds004789 ds004809 ds005059 ds005670
+```
+
+并行覆盖每个数据集从下载到校验、实体化的整个流程；有一个流程结束后才启动队列中的下一个。各数据集有独立的状态和锁，一个失败不影响其他数据集。中断后可改变 `-p` 和 `-j` 恢复，已固定的数据版本不变。
+
+并行会增加网络、内存、磁盘和校验阶段的 CPU 需求，Slurm 资源需相应调整。特别是多个数据集同时实体化时，必须预留各自 annex 对象与实体文件的合计空间。增加并发不保证提速。多个数据集的日志可能交错，可通过带 ID 的阶段信息及各自 `state.json` 区分进度。
 ## 版本与输出
 
 | 输入 | 下载版本 | 输出目录名 |
@@ -143,6 +158,19 @@ openneuro download --version 1.0.3 ds002721 ds002721
 - 成功后保留 `.datalad`、`.gitattributes` 等原有文件，并新增 `.openneuro-download.json`；删除 `.git` 后，该目录不再支持 Git/DataLad 更新。
 - 不支持 Git 子模块/DataLad 子数据集、嵌套仓库、目录符号链接和指向数据集外部的文件链接，遇到这些结构会报错。
 
+## 日志
+
+日志写入标准输出，Slurm 可用 `--output=.../openneuro-%j.log` 保存。脚本日志和下载子进程的标准输出、错误输出统一加上时间（含时区）、数据集 ID 与事件类型；并行任务的行会交错，但可按 ID 筛选。
+
+```text
+[2026-10-08T21:00:00+08:00] [ds004789] [START] phase=get version=3.1.0
+[2026-10-08T21:10:00+08:00] [ds004789] [DONE] phase=get elapsed=600.0s version=3.1.0
+[2026-10-08T21:10:00+08:00] [ds004789] [START] phase=verify version=3.1.0
+```
+
+阶段为 `resolve`（确定版本）、`clone`（获取仓库）、`get`（下载内容）、`verify`（完整性校验）、`materialize`（转为实体文件）、`cleanup`（删除 Git 元数据）、`publish`（移到最终目录）。每阶段成功结束并保存恢复状态后输出 `DONE` 和本次执行耗时；失败输出 `FAILED`，包含失败阶段、耗时、错误和恢复位置，不会误记为成功。
+
+`COMMAND` 记录外部命令，`OUTPUT` 标识命令输出，`RESUME` 记录起始阶段，`SKIP` 表示已有完成记录，`COMPLETE` 表示数据集成功结束，`BATCH_DONE` 汇总成功和失败数量。恢复后的耗时仅统计当前这次运行。子程序自身未输出进度时，阶段中间仍可能暂时没有新日志；这里没有额外的定时进度采样。
 ## 测试
 
 在 Linux 服务器的脚本目录运行：

@@ -21,12 +21,13 @@ if '-c' in args:
     command = args[args.index('python3'):]
     command[-1] = str(pathlib.Path(root) / pathlib.Path(command[-1]).name)
     sys.exit(subprocess.call(command))
+assert args[args.index('--dataset-jobs') + 1] == os.environ.get('EXPECTED_DATASET_JOBS', '1')
 sys.exit(0)
 '''
 
 
 class BootstrapTests(unittest.TestCase):
-    def check_case(self, mode='ok', local=False):
+    def check_case(self, mode='ok', local=False, parallel=1):
         with tempfile.TemporaryDirectory(prefix='bootstrap test ') as tmp:
             root = Path(tmp)
             shell = root / 'download-openneuro.sh'
@@ -41,8 +42,8 @@ class BootstrapTests(unittest.TestCase):
                 worker.write_text('# local worker\n')
             calls = root / 'calls'
             env = dict(os.environ, PATH=str(root) + ':' + os.environ['PATH'],
-                       OPENNEURO_CONTAINER=str(image), CALLS=str(calls), DOWNLOAD_MODE=mode)
-            result = subprocess.run(['bash', str(shell), '-o', str(root / 'output'), 'ds002721'],
+                       OPENNEURO_CONTAINER=str(image), CALLS=str(calls), DOWNLOAD_MODE=mode, EXPECTED_DATASET_JOBS=str(parallel))
+            result = subprocess.run(['bash', str(shell), '-o', str(root / 'output'), '-p', str(parallel), 'ds002721'],
                                     env=env, text=True, capture_output=True)
             invocations = calls.read_text().splitlines()
             self.assertEqual(list(root.glob('.download_openneuro.py.*')), [])
@@ -64,6 +65,9 @@ class BootstrapTests(unittest.TestCase):
 
     def test_missing_worker_is_downloaded(self):
         self.check_case()
+
+    def test_dataset_parallelism_is_forwarded(self):
+        self.check_case(local=True, parallel=4)
 
     def test_failed_download_is_cleaned(self):
         self.check_case(mode='fail')
