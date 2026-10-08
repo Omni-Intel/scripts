@@ -10,7 +10,12 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
-import download_openneuro as worker
+import importlib.util
+
+_module_spec = importlib.util.spec_from_file_location(
+    'openneuro_worker', Path(__file__).with_name('download-openneuro.py'))
+worker = importlib.util.module_from_spec(_module_spec)
+_module_spec.loader.exec_module(worker)
 
 
 class DownloadTests(unittest.TestCase):

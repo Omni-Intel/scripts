@@ -41,11 +41,11 @@ output=$(cd -- "$output" && pwd)
 [[ $output != *:* && $output != *,* && $script_dir != *:* && $script_dir != *,* ]] || {
     echo 'Output/script paths must not contain commas or colons.' >&2; exit 2;
 }
-worker="$script_dir/download_openneuro.py"
+worker="$script_dir/download-openneuro.py"
 if [[ ! -e $worker && ! -L $worker ]]; then
-    worker_url='https://raw.githubusercontent.com/Omni-NCC/scripts/main/openneuro/download_openneuro.py'
+    worker_url='https://raw.githubusercontent.com/Omni-NCC/scripts/main/openneuro/download-openneuro.py'
     echo "Python worker not found; downloading from $worker_url" >&2
-    temporary_worker=$(mktemp "$script_dir/.download_openneuro.py.XXXXXX")
+    temporary_worker=$(mktemp "$script_dir/.download-openneuro.py.XXXXXX")
     trap 'rm -f -- "$temporary_worker"' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
@@ -76,4 +76,4 @@ fi
 exec "$runtime" exec \
     --bind "$output:/downloads" --bind "$script_dir:/download-script:ro" \
     --pwd /downloads "$image" \
-    python3 -B /download-script/download_openneuro.py --jobs "$jobs" --dataset-jobs "$dataset_jobs" "$@"
+    python3 -B /download-script/download-openneuro.py --jobs "$jobs" --dataset-jobs "$dataset_jobs" "$@"

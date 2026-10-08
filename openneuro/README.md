@@ -7,10 +7,10 @@
 | 文件 | 用途 |
 | --- | --- |
 | `download-openneuro.sh` | 使用入口，处理参数并启动容器 |
-| `download_openneuro.py` | 下载、恢复、校验和文件转换 |
-| `test_download_openneuro.py` | 容器内合成数据测试，不下载真实数据集 |
+| `download-openneuro.py` | 下载、恢复、校验和文件转换 |
+| `test-download-openneuro.py` | 容器内合成数据测试，不下载真实数据集 |
 
-在 **Linux 服务器**上运行，宿主机需要 Bash 和 Apptainer 或 Singularity。脚本优先使用 Apptainer。可只把 Bash 入口放到服务器。若同目录缺少 `download_openneuro.py`，首次运行会从本仓库 GitHub `main` 分支下载；本地已存在时直接使用，不自动覆盖或更新。也可以手动将两个脚本放在同一目录；Windows 目录 `D:\workspace\scripts\openneuro` 用于存放代码，下面的命令应在 Linux 执行。
+在 **Linux 服务器**上运行，宿主机需要 Bash 和 Apptainer 或 Singularity。脚本优先使用 Apptainer。可只把 Bash 入口放到服务器。若同目录缺少 `download-openneuro.py`，首次运行会从本仓库 GitHub `main` 分支下载；本地已存在时直接使用，不自动覆盖或更新。也可以手动将两个脚本放在同一目录；Windows 目录 `D:\workspace\scripts\openneuro` 用于存放代码，下面的命令应在 Linux 执行。
 
 默认容器为 `/home/container/download-tools.sif`，其中需要 Deno、DataLad、Git、git-annex、Python 3.11 或以上版本，以及 `git-annex-remote-openneuro`。宿主机无需安装 Python 或 DataLad。脚本直接调用容器 PATH 中已安装的 `openneuro`（Deno 安装的启动器），不固定或自动升级 CLI 版本。启动时执行 `openneuro --version` 并显示实际版本；容器更换 CLI 后，会重新导入对应的 Deno 缓存。对于 Deno 安装生成的启动器，还会把配置、`deno.lock` 和相关依赖复制到可写缓存，并让下载命令与 annex 后端使用同一启动器，避免向只读 SIF 写入锁文件。CLI 版本与数据集版本号无关。缺少 `openneuro` 时会明确报错。
 
@@ -49,9 +49,9 @@ bash download-openneuro.sh -o /data/openneuro ds002721
 
 ## 自动获取 Python 脚本
 
-本地缺少 `download_openneuro.py` 时，Bash 入口从以下地址下载并保存到自身所在目录：
+本地缺少 `download-openneuro.py` 时，Bash 入口从以下地址下载并保存到自身所在目录：
 
-<https://raw.githubusercontent.com/Omni-NCC/scripts/main/openneuro/download_openneuro.py>
+<https://raw.githubusercontent.com/Omni-NCC/scripts/main/openneuro/download-openneuro.py>
 
 下载使用容器中的 `curl`，宿主机无需安装 curl 或 Python。脚本目录须可写，容器须能访问 GitHub。下载成功且通过 Python 语法检查后才安装文件；下载失败、空文件或语法错误会停止运行并清理临时文件。已有文件不会被自动更新。GitHub 上可下载的是已推送到 `main` 的版本，本地未推送的改动不会包含在内。
 ## 参数
@@ -179,7 +179,7 @@ openneuro download --version 1.0.3 ds002721 ds002721
 apptainer exec \
   --bind "$PWD:/openneuro-scripts:ro" \
   /home/container/download-tools.sif \
-  python3 -B /openneuro-scripts/test_download_openneuro.py
+  python3 -B /openneuro-scripts/test-download-openneuro.py
 ```
 
 只有 Singularity 时，将 `apptainer` 替换为 `singularity`。

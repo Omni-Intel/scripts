@@ -37,7 +37,7 @@ class BootstrapTests(unittest.TestCase):
             runtime.chmod(0o755)
             image = root / 'test.sif'
             image.touch()
-            worker = root / 'download_openneuro.py'
+            worker = root / 'download-openneuro.py'
             if local:
                 worker.write_text('# local worker\n')
             calls = root / 'calls'
@@ -46,7 +46,7 @@ class BootstrapTests(unittest.TestCase):
             result = subprocess.run(['bash', str(shell), '-o', str(root / 'output'), '-p', str(parallel), 'ds002721'],
                                     env=env, text=True, capture_output=True)
             invocations = calls.read_text().splitlines()
-            self.assertEqual(list(root.glob('.download_openneuro.py.*')), [])
+            self.assertEqual(list(root.glob('.download-openneuro.py.*')), [])
             if local:
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(worker.read_text(), '# local worker\n')
