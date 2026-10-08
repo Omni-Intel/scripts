@@ -1,46 +1,51 @@
-# OpenNeuro 批量下载
+# OpenNeuro 批量下载与续传
 
-使用 Apptainer/Singularity 容器，通过 Deno OpenNeuro CLI 获取数据集仓库，再由 DataLad 下载数据内容。校验完成后，将文件符号链接转换为独立的实际文件，并删除 `.git`，输出可直接读取的普通数据目录。
+通过 Apptainer/Singularity 容器，用 Deno OpenNeuro CLI 获取仓库，再由 DataLad 补齐数据。校验完成后，把符号链接复制为独立文件并删除 `.git`。中断后重新执行相同命令，即可从保存的阶段继续。
 
 ## 文件与环境
 
 | 文件 | 用途 |
 | --- | --- |
 | `download-openneuro.sh` | 使用入口，处理参数并启动容器 |
-| `download_openneuro.py` | 容器内执行下载、校验和文件转换 |
-| `test_download_openneuro.py` | 使用临时合成数据测试，不下载真实数据集 |
+| `download_openneuro.py` | 下载、恢复、校验和文件转换 |
+| `test_download_openneuro.py` | 容器内合成数据测试，不下载真实数据集 |
 
-在 **Linux 服务器**上运行，宿主机需要 Bash，以及 Apptainer 或 Singularity。脚本优先使用 Apptainer。
+在 **Linux 服务器**上运行，宿主机需要 Bash 和 Apptainer 或 Singularity。脚本优先使用 Apptainer。将两个下载脚本放在服务器的同一目录；Windows 目录 `D:\workspace\scripts\openneuro` 用于存放代码，下面的命令应在 Linux 执行。
 
-默认容器路径为 `/home/container/download-tools.sif`。容器须包含 Deno、DataLad、Git、git-annex、Python 3.11 或以上版本，以及 `git-annex-remote-openneuro`。现有容器已验证包含所需工具。OpenNeuro CLI 在脚本中固定为 `5.6.0`；这与数据集的版本号无关。
+默认容器为 `/home/container/download-tools.sif`，其中需要 Deno、DataLad、Git、git-annex、Python 3.11 或以上版本，以及 `git-annex-remote-openneuro`。宿主机无需安装 Python 或 DataLad。脚本固定使用 OpenNeuro CLI `5.6.0`，与数据集版本号无关。
 
-把两个下载脚本放在服务器的同一目录。Windows 上的 `D:\workspace\scripts\openneuro` 是脚本存放目录；下面的命令应在 Linux 服务器执行。脚本通过容器调用 Python，宿主机无需额外安装 Python 或 DataLad。
-
-## 快速使用
+## 使用示例
 
 在脚本所在目录执行：
 
 ```bash
-# 下载最新发布快照，不是 draft
+# 最新发布快照
 bash download-openneuro.sh ds002721
 
-# 批量下载，按输入顺序逐个处理
+# 按顺序批量下载
 bash download-openneuro.sh ds002721 ds003505
 
-# 下载指定版本
+# 指定版本
 bash download-openneuro.sh ds002721v1.0.3
 
-# 混合指定版本和最新版本
-bash download-openneuro.sh ds002721v1.0.3 ds003505
-
-# 指定输出目录与单个数据集的下载并发数
+# 指定输出目录、单个数据集的下载并发数；可混合版本形式
 bash download-openneuro.sh \
   -o /home/lapluis/workspace/dataset-collection \
   -j 4 \
   ds002721v1.0.3 ds003505
 ```
 
-输入格式为 `ds` 加六位数字，可附加 `v主版本.次版本.修订号`。多个 ID 用空格分隔；所有选项放在第一个 ID 之前。脚本检查 ID 格式，数据集和版本是否存在由 OpenNeuro 返回结果决定。
+中断后，在相同输出目录重新执行原命令。无须添加续传选项；可以调整 `-j`。
+
+```bash
+# 第一次运行，中途断网或 Ctrl+C
+bash download-openneuro.sh -o /data/openneuro ds002721
+
+# 恢复同一任务
+bash download-openneuro.sh -o /data/openneuro ds002721
+```
+
+输入是 `ds` 加六位数字，可附加 `v主版本.次版本.修订号`。多个 ID 用空格分隔，同一次调用中的重复输入只处理一次。脚本检查格式，OpenNeuro 检查数据集和版本是否存在。
 
 ## 参数
 
@@ -48,71 +53,88 @@ bash download-openneuro.sh \
 bash download-openneuro.sh [-o OUTPUT] [-j JOBS] ID [ID ...]
 ```
 
+所有选项放在第一个 ID 前面。
+
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `-o` / `--output` | 调用命令时的当前目录 | 输出目录，不存在时创建 |
-| `-j` / `--jobs` | `4` | DataLad 下载并发数，必须为正整数；不是同时下载的数据集数量 |
+| `-o` / `--output` | 调用时的当前目录 | 输出目录，不存在时创建 |
+| `-j` / `--jobs` | `4` | DataLad 下载并发数，必须为正整数；数据集之间仍顺序执行 |
 | `-h` / `--help` | — | 显示帮助 |
 
-通过环境变量替换容器路径：
+替换容器路径：
 
 ```bash
 OPENNEURO_CONTAINER=/path/to/download-tools.sif \
   bash download-openneuro.sh -o /data/openneuro ds002721
 ```
 
-脚本目录和输出目录不能包含逗号或冒号，因为这些字符用于容器挂载参数。包含空格的路径需要使用引号。
+脚本目录和输出目录不能含逗号或冒号，含空格的路径须加引号。默认连接 `https://openneuro.org`；若设置 `OPENNEURO_URL`，恢复时须保持同一地址。需要认证时，通过 `OPENNEURO_API_KEY` 环境变量提供密钥，版本查询和 CLI 均可使用它；不要把密钥写进脚本或提交到 Git。
 
-## 版本与输出目录
+## 版本与输出
 
 | 输入 | 下载版本 | 输出目录名 |
 | --- | --- | --- |
-| `ds002721` | 下载时的最新发布快照 | `ds002721/` |
+| `ds002721` | 首次成功查询到的最新发布快照 | `ds002721/` |
 | `ds002721v1.0.3` | `1.0.3` | `ds002721v1.0.3/` |
 
-指定版本时，脚本在独立临时目录中执行：
+对于 `latest`，脚本先通过 OpenNeuro API 查询并保存实际版本，再开始下载。此后恢复仍使用已保存的版本，即使服务器发布了更新版本。没有正式版本快照时会报错，不自动转为 draft。
+
+所有下载都传入明确版本。例如，在工作目录内执行：
 
 ```bash
 deno run -A jsr:@openneuro/cli@5.6.0 download --version 1.0.3 ds002721 ds002721
 ```
 
-它还会检查下载仓库的 HEAD 是否对应所请求的版本标签。未指定版本时省略 `--version`。最后将临时目录内的 `ds002721` 移为输出目录中的 `ds002721v1.0.3`。
-
-成功后的输出结构示例：
+完成后将内部 `ds002721` 目录移到最终位置。脚本校验版本标签与 HEAD，并保存提交号；后续恢复会检查提交号没有改变。
 
 ```text
 输出目录/
-├── .openneuro-deno-cache/        # 可写的 Deno 缓存
-├── ds002721v1.0.3/              # 实际数据文件，无 .git
-└── ds003505/                    # 实际数据文件，无 .git
+├── .openneuro-deno-cache/          # 可写的 Deno 缓存
+├── .openneuro-work/
+│   └── ds002721v1.0.3/
+│       ├── lock                   # 防止同一任务同时运行
+│       ├── state.json             # 阶段、实际版本、提交号和任务标识
+│       ├── manifest.json          # 数据路径、大小和 SHA-256 清单
+│       └── ds002721/              # 处理中存在，成功后移到最终位置
+└── ds002721v1.0.3/
+    ├── .openneuro-download.json    # 下载完成凭据和版本记录
+    └── ...                        # 实际数据文件，无 .git
 ```
 
-日志中的 `/downloads` 是容器内路径，对应宿主机的输出目录。
+工作目录可能另外含有复制缓冲目录和临时状态文件。成功后保留状态和清单，供再次运行时识别已完成任务；缓存也会保留。日志中的 `/downloads` 对应宿主机的输出目录。
 
-## 下载和校验流程
+## 恢复行为
 
-1. 在输出目录下建立独立临时目录 `.ID.partial-随机字符/`。
-2. 使用 Deno OpenNeuro CLI 下载仓库。
-3. 执行 `datalad get -J JOBS .` 补全数据内容。
-4. 执行 `git annex fsck --numcopies=1` 检查 annex 数据。
-5. 检查文件链接，把链接内容复制为独立文件，并使用 SHA-256 校验复制结果。复制后的文件不是硬链接。
-6. 确认数据目录内不再有符号链接，然后删除该临时仓库的 `.git`。
-7. 将数据目录移到最终位置，输出 `COMPLETE`。
+| 中断阶段 | 再次运行时的行为 |
+| --- | --- |
+| 查询版本 | 重试查询；保存成功后固定版本 |
+| Deno 下载仓库 | 在相同目录重试固定版本的 CLI 命令，利用 CLI 对已有仓库的处理 |
+| DataLad 下载数据 | 跳过 Deno，重新运行 `datalad get`，复用已完成的 annex 对象 |
+| annex 校验 | 重试校验；校验命令失败后，下次先重新运行 `get`，补回被隔离的损坏对象 |
+| 链接实体化 | 校验已转换文件，继续复制剩余链接，不再下载数据 |
+| 删除 `.git` | 依据已保存清单验证实体文件，再继续清理；支持 `.git` 已部分或全部删除的情况 |
+| 移到最终目录 | 继续移动，或通过完成凭据识别上次已完成的移动 |
+| 已完成 | 检查完成凭据，跳过下载；不会自动更新到新版本，也不会重新执行全量哈希检查 |
 
-脚本保留 `.datalad`、`.gitattributes` 等数据集原有文件，只清理 `.git`。完成后的目录不再是 Git/DataLad 仓库，不能继续通过 `datalad get` 或 Git 更新版本。
+这是**文件级恢复**。OpenNeuro CLI 5.6.0 的数据传输后端没有实现 HTTP Range 续传，下载到一半的单个文件可能从头重下。仓库克隆若留下 CLI 无法处理的损坏状态，仍可能需要人工排查；脚本会保留现场。
 
-实体化期间，annex 对象与复制出的文件会同时占用空间。应预留“annex 对象大小 + 最终普通文件大小”，另加仓库、缓存和临时文件空间；常见情况下接近最终数据大小的两倍。
+旧版脚本留下的 `.ID.partial-随机字符/` 没有恢复状态，**不会自动接管**。它们不会被本脚本删除。
 
-## 重复运行与失败处理
+## 校验、空间与保护
 
-- 已有同名输出目录时，脚本报错，不覆盖，也不检查或更新该目录。需要重新下载时，可选择另一个输出目录。
-- 同一次调用中，完全相同的 ID 参数只处理一次。
-- 某个数据集下载或校验失败后，脚本保留临时目录并打印位置，继续处理其他数据集。Ctrl+C 会中断整个任务。
-- 全部成功时退出码为 `0`；有数据集失败时为 `1`；入口参数错误通常为 `2`。
-- **当前不支持自动续传已有临时目录。** 再次调用会新建临时目录；旧目录保留供排查或人工恢复，会继续占用磁盘空间。
-- 下载、annex 校验或链接转换失败时不会执行 `.git` 清理；若失败发生在清理或最终移动阶段，应根据日志检查临时目录状态。
+处理顺序为：获取仓库 → DataLad 补全 → `git annex fsck --numcopies=1` → 保存 SHA-256 清单 → 链接复制为实际文件 → 校验 → 删除 `.git` → 移到最终目录。
 
-当前脚本不支持 Git 子模块/DataLad 子数据集、嵌套仓库、目录符号链接或指向数据集外部的文件链接。发现这些结构会停止处理该数据集，避免输出不完整结果。
+复制出的文件彼此独立，不是硬链接。删除 `.git` 前会检查所有数据文件的路径、大小和哈希。恢复实体化时，如果已经转换的文件被改动，会停止处理，不删除 `.git`。完整性检查会多次读取数据，大数据集的校验和转换需要时间。
+
+实体化期间，annex 对象和最终文件同时占用空间。预留“annex 对象大小 + 最终文件大小”，另加仓库、缓存和临时文件空间；常见情况下接近最终数据大小的两倍。
+
+- 没有匹配恢复记录的同名输出目录不会被覆盖。
+- 同一输出目录中的同一 ID 有进程锁，重复启动会报错；锁文件保留不代表锁仍被占用。
+- 某个数据集失败后保留恢复记录，继续处理其他 ID；Ctrl+C 中断整个任务。
+- 全部成功时退出码为 `0`，有数据集失败时为 `1`；入口参数错误通常为 `2`。
+- 要下载新的 latest，可指定新的输出目录；不要修改现有任务的状态文件来切换版本。
+- 成功后保留 `.datalad`、`.gitattributes` 等原有文件，并新增 `.openneuro-download.json`；删除 `.git` 后，该目录不再支持 Git/DataLad 更新。
+- 不支持 Git 子模块/DataLad 子数据集、嵌套仓库、目录符号链接和指向数据集外部的文件链接，遇到这些结构会报错。
 
 ## 测试
 
@@ -127,4 +149,4 @@ apptainer exec \
 
 只有 Singularity 时，将 `apptainer` 替换为 `singularity`。
 
-测试覆盖版本参数传递、真实 DataLad/git-annex 本地流程、链接实体化、删除 `.git`、已有目录保护、异常链接拒绝，以及下载失败时保留仓库。Deno 下载步骤使用本地合成仓库替代，因此测试通过不代表已验证 OpenNeuro 网络访问或真实数据集下载。
+测试使用临时合成仓库，执行真实的 DataLad/git-annex 本地操作，覆盖版本固定、恢复阶段、实体化校验、已有输出保护和并发锁。Deno 下载与 latest 查询由测试替代，因此不代表已验证真实数据集的完整网络下载。

@@ -13,6 +13,7 @@ while (($#)); do
             echo "Usage: bash $0 [-o OUTPUT] [-j JOBS] ID [ID ...]"
             echo "IDs: ds002721 (latest snapshot), ds002721v1.0.3 (specific version)."
             echo "Set OPENNEURO_CONTAINER to override /home/container/download-tools.sif."
+            echo "Interrupted downloads resume automatically in the same output directory."
             exit 0 ;;
         --) shift; break ;;
         -*) echo "Unknown option: $1" >&2; exit 2 ;;
