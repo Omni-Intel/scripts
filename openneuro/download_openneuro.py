@@ -14,7 +14,7 @@ import tempfile
 import urllib.request
 import uuid
 
-CLI = 'jsr:@openneuro/cli@5.6.0'
+CLI = 'openneuro'
 RECEIPT = '.openneuro-download.json'
 PHASES = ('resolve', 'clone', 'get', 'verify', 'materialize', 'cleanup', 'publish', 'complete')
 
@@ -210,7 +210,7 @@ def check_repo(dataset, state):
     return head
 
 
-def download(spec, output, jobs):
+def download(spec, output, jobs, cli=CLI):
     match = re.fullmatch(r'(ds[0-9]{6})(?:v([0-9]+\.[0-9]+\.[0-9]+))?', spec)
     if not match:
         raise ValueError(f'Invalid dataset ID: {spec}')
@@ -252,7 +252,7 @@ def download(spec, output, jobs):
             if state['phase'] == 'clone':
                 if dataset.is_symlink():
                     raise RuntimeError('Refusing symlink dataset directory')
-                run(['deno', 'run', '-A', CLI, 'download', '--version', state['version'],
+                run([cli, 'download', '--version', state['version'],
                      accession, accession], stage)
                 state['commit'] = check_repo(dataset, state)
                 if os.path.lexists(dataset / RECEIPT):
@@ -321,6 +321,93 @@ def validate_receipt(destination, state):
         raise RuntimeError(f'Output still contains .git: {destination}')
 
 
+def writable_cli(executable, cache, identity):
+    """Relocate a deno-install launcher's config/lock/node_modules out of SIF."""
+    launcher = Path(executable).read_text()
+    command = None
+    for line in launcher.splitlines():
+        if line.startswith('exec '):
+            parts = shlex.split(line)
+            if len(parts) > 3 and Path(parts[1]).name == 'deno' and parts[2] == 'run':
+                command = parts[1:]
+                break
+    if command is None or '--config' not in command:
+        return executable
+    if command[-1] != '$@':
+        raise RuntimeError('Unsupported Deno launcher argument forwarding')
+    command.pop()
+    config_index = command.index('--config') + 1
+    source_config = Path(command[config_index])
+    if not source_config.is_absolute() or not source_config.is_file():
+        raise RuntimeError(f'Invalid installed Deno configuration: {source_config}')
+    runtime_identity = dict(identity, config=signature(source_config))
+    source_lock = source_config.parent / 'deno.lock'
+    if source_lock.is_file():
+        runtime_identity['lock'] = signature(source_lock)
+    key = hashlib.sha256(json.dumps(runtime_identity, sort_keys=True).encode()).hexdigest()[:24]
+    runtimes = cache / 'cli-runtime'
+    real_directory(runtimes)
+    runtime = runtimes / key
+    real_directory(runtime)
+    wrapper = runtime / 'openneuro'
+    if not wrapper.exists():
+        config_dir = runtime / 'config'
+        # Copy the whole installation config directory, including npm dependencies.
+        shutil.copytree(source_config.parent, config_dir, dirs_exist_ok=True)
+        for directory, _, names in os.walk(config_dir):
+            parent = Path(directory)
+            parent.chmod(parent.stat().st_mode | 0o700)
+            for name in names:
+                path = parent / name
+                if not path.is_symlink():
+                    path.chmod(path.stat().st_mode | 0o600)
+        command[config_index] = str(config_dir / source_config.name)
+        command[0] = shutil.which(command[0]) or command[0]
+        fd, temporary = tempfile.mkstemp(prefix='.launcher-', dir=runtime)
+        try:
+            with os.fdopen(fd, 'w') as stream:
+                stream.write('#!/bin/sh\nexec ' + shlex.join(command) + ' "$@"\n')
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary, 0o755)
+            os.replace(temporary, wrapper)
+            sync_dir(runtime)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+    # git-annex-remote-openneuro calls `openneuro` via PATH as well.
+    os.environ['PATH'] = str(runtime) + os.pathsep + os.environ['PATH']
+    return str(wrapper)
+
+def prepare_cli(output):
+    """Use the installed Deno launcher, just like the annex special remote."""
+    executable = shutil.which(CLI)
+    if executable is None:
+        raise RuntimeError('Container has no openneuro executable on PATH; install the Deno CLI in the container')
+    # Probe against the container's original cache before selecting our writable
+    # cache. No version is inferred from the dataset or from an old cache marker.
+    source = Path(os.environ.get('DENO_DIR', '/opt/deno-cache')).resolve()
+    version = subprocess.check_output(
+        [executable, '--version'], text=True, stderr=subprocess.STDOUT, timeout=60,
+    )
+    version = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', version).strip()
+    if not version:
+        raise RuntimeError('Installed openneuro --version returned no version information')
+    identity = {'command': executable, 'version': version, 'source_cache': str(source),
+                'launcher_sha256': hashlib.sha256(Path(executable).read_bytes()).hexdigest()}
+    cache = output / '.openneuro-deno-cache'
+    real_directory(cache)
+    marker = cache / '.seeded'
+    with lock(cache / 'seed.lock'):
+        previous = json.loads(marker.read_text()) if marker.exists() else None
+        if previous != identity:
+            if source.is_dir() and source != cache.resolve():
+                shutil.copytree(source, cache, dirs_exist_ok=True)
+            write_json(marker, identity)
+        runtime_cli = writable_cli(executable, cache, identity)
+    os.environ['DENO_DIR'] = str(cache)
+    print(f'OpenNeuro CLI: {version} ({executable})', flush=True)
+    return runtime_cli
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--jobs', type=int, default=4)
@@ -329,17 +416,12 @@ def main():
     if args.jobs < 1:
         parser.error('--jobs must be positive')
     output = Path.cwd().resolve()
-    cache = output / '.openneuro-deno-cache'
-    real_directory(cache)
-    os.environ['DENO_DIR'] = str(cache)
-    with lock(cache / 'seed.lock'):
-        if not (cache / '.seeded').exists() and Path('/opt/deno-cache').is_dir():
-            shutil.copytree('/opt/deno-cache', cache, dirs_exist_ok=True)
-            write_json(cache / '.seeded', {'cli': CLI})
+    cli = prepare_cli(output)
+
     failed = []
     for spec in dict.fromkeys(args.datasets):
         try:
-            download(spec, output, args.jobs)
+            download(spec, output, args.jobs, cli=cli)
         except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
             print(f'FAILED {spec}: {error}', flush=True)
             failed.append(spec)

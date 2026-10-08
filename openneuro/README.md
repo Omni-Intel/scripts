@@ -10,9 +10,9 @@
 | `download_openneuro.py` | 下载、恢复、校验和文件转换 |
 | `test_download_openneuro.py` | 容器内合成数据测试，不下载真实数据集 |
 
-在 **Linux 服务器**上运行，宿主机需要 Bash 和 Apptainer 或 Singularity。脚本优先使用 Apptainer。将两个下载脚本放在服务器的同一目录；Windows 目录 `D:\workspace\scripts\openneuro` 用于存放代码，下面的命令应在 Linux 执行。
+在 **Linux 服务器**上运行，宿主机需要 Bash 和 Apptainer 或 Singularity。脚本优先使用 Apptainer。可只把 Bash 入口放到服务器。若同目录缺少 `download_openneuro.py`，首次运行会从本仓库 GitHub `main` 分支下载；本地已存在时直接使用，不自动覆盖或更新。也可以手动将两个脚本放在同一目录；Windows 目录 `D:\workspace\scripts\openneuro` 用于存放代码，下面的命令应在 Linux 执行。
 
-默认容器为 `/home/container/download-tools.sif`，其中需要 Deno、DataLad、Git、git-annex、Python 3.11 或以上版本，以及 `git-annex-remote-openneuro`。宿主机无需安装 Python 或 DataLad。脚本固定使用 OpenNeuro CLI `5.6.0`，与数据集版本号无关。
+默认容器为 `/home/container/download-tools.sif`，其中需要 Deno、DataLad、Git、git-annex、Python 3.11 或以上版本，以及 `git-annex-remote-openneuro`。宿主机无需安装 Python 或 DataLad。脚本直接调用容器 PATH 中已安装的 `openneuro`（Deno 安装的启动器），不固定或自动升级 CLI 版本。启动时执行 `openneuro --version` 并显示实际版本；容器更换 CLI 后，会重新导入对应的 Deno 缓存。对于 Deno 安装生成的启动器，还会把配置、`deno.lock` 和相关依赖复制到可写缓存，并让下载命令与 annex 后端使用同一启动器，避免向只读 SIF 写入锁文件。CLI 版本与数据集版本号无关。缺少 `openneuro` 时会明确报错。
 
 ## 使用示例
 
@@ -47,6 +47,13 @@ bash download-openneuro.sh -o /data/openneuro ds002721
 
 输入是 `ds` 加六位数字，可附加 `v主版本.次版本.修订号`。多个 ID 用空格分隔，同一次调用中的重复输入只处理一次。脚本检查格式，OpenNeuro 检查数据集和版本是否存在。
 
+## 自动获取 Python 脚本
+
+本地缺少 `download_openneuro.py` 时，Bash 入口从以下地址下载并保存到自身所在目录：
+
+<https://raw.githubusercontent.com/Omni-NCC/scripts/main/openneuro/download_openneuro.py>
+
+下载使用容器中的 `curl`，宿主机无需安装 curl 或 Python。脚本目录须可写，容器须能访问 GitHub。下载成功且通过 Python 语法检查后才安装文件；下载失败、空文件或语法错误会停止运行并清理临时文件。已有文件不会被自动更新。GitHub 上可下载的是已推送到 `main` 的版本，本地未推送的改动不会包含在内。
 ## 参数
 
 ```text
@@ -82,7 +89,7 @@ OPENNEURO_CONTAINER=/path/to/download-tools.sif \
 所有下载都传入明确版本。例如，在工作目录内执行：
 
 ```bash
-deno run -A jsr:@openneuro/cli@5.6.0 download --version 1.0.3 ds002721 ds002721
+openneuro download --version 1.0.3 ds002721 ds002721
 ```
 
 完成后将内部 `ds002721` 目录移到最终位置。脚本校验版本标签与 HEAD，并保存提交号；后续恢复会检查提交号没有改变。
@@ -116,7 +123,7 @@ deno run -A jsr:@openneuro/cli@5.6.0 download --version 1.0.3 ds002721 ds002721
 | 移到最终目录 | 继续移动，或通过完成凭据识别上次已完成的移动 |
 | 已完成 | 检查完成凭据，跳过下载；不会自动更新到新版本，也不会重新执行全量哈希检查 |
 
-这是**文件级恢复**。OpenNeuro CLI 5.6.0 的数据传输后端没有实现 HTTP Range 续传，下载到一半的单个文件可能从头重下。仓库克隆若留下 CLI 无法处理的损坏状态，仍可能需要人工排查；脚本会保留现场。
+这是**文件级恢复**。单个文件是否支持 HTTP Range 续传取决于容器实际安装的 CLI 及其传输后端；脚本不保证字节级续传，下载到一半的文件可能从头重下。仓库克隆若留下 CLI 无法处理的损坏状态，仍可能需要人工排查；脚本会保留现场。
 
 旧版脚本留下的 `.ID.partial-随机字符/` 没有恢复状态，**不会自动接管**。它们不会被本脚本删除。
 
@@ -149,4 +156,4 @@ apptainer exec \
 
 只有 Singularity 时，将 `apptainer` 替换为 `singularity`。
 
-测试使用临时合成仓库，执行真实的 DataLad/git-annex 本地操作，覆盖版本固定、恢复阶段、实体化校验、已有输出保护和并发锁。Deno 下载与 latest 查询由测试替代，因此不代表已验证真实数据集的完整网络下载。
+测试使用临时合成仓库，执行真实的 DataLad/git-annex 本地操作，覆盖版本固定、恢复阶段、实体化校验、已有输出保护和并发锁。OpenNeuro CLI 下载与 latest 查询由测试替代，因此不代表已验证真实数据集的完整网络下载。

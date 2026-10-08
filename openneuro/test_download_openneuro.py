@@ -23,7 +23,7 @@ class DownloadTests(unittest.TestCase):
 
     def fixture(self, args, cwd):
         self.calls.append(args)
-        if args[0] != 'deno':
+        if args[0] != 'openneuro':
             return self.actual_run(args, cwd)
         repo = cwd / args[-1]
         if repo.exists():
@@ -66,7 +66,7 @@ class DownloadTests(unittest.TestCase):
         self.invoke()
         self.assertEqual(len(self.calls), calls)
         self.assertEqual(self.state()['phase'], 'complete')
-        clones = [c for c in self.calls if c[0] == 'deno']
+        clones = [c for c in self.calls if c[0] == 'openneuro']
         self.assertTrue(all(c[-4:] == ['--version', '1.0.3', 'ds002721', 'ds002721'] for c in clones))
 
     def test_existing_output_is_not_overwritten(self):
@@ -76,7 +76,7 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_clone_failure_pins_latest(self):
-        with patch.object(worker, 'run', side_effect=subprocess.CalledProcessError(1, ['deno'])):
+        with patch.object(worker, 'run', side_effect=subprocess.CalledProcessError(1, ['openneuro'])):
             with self.assertRaises(subprocess.CalledProcessError):
                 self.invoke()
         self.assertEqual(self.state()['version'], '1.0.3')
@@ -95,7 +95,7 @@ class DownloadTests(unittest.TestCase):
                 self.invoke()
         self.assertEqual(self.state()['phase'], 'get')
         self.invoke()
-        self.assertEqual(sum(c[0] == 'deno' for c in self.calls), 1)
+        self.assertEqual(sum(c[0] == 'openneuro' for c in self.calls), 1)
         self.assert_export()
 
     def interrupt_materialize(self):
@@ -204,6 +204,66 @@ class DownloadTests(unittest.TestCase):
             worker.materialize(repo)
         self.assertEqual(outside.read_text(), 'preserve')
 
+
+class InstalledCliTests(unittest.TestCase):
+    def test_actual_cli_and_cache_refresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / 'bundled-cache'
+            source.mkdir()
+            (source / 'module').write_text('old')
+            launcher = root / 'openneuro'
+            launcher.write_text('#!/bin/sh\n# installed launcher\n')
+            with patch.object(worker.shutil, 'which', return_value=str(launcher)), \
+                    patch.object(worker.subprocess, 'check_output', return_value='\x1b[1mopenneuro\x1b[0m 5.9.1\n') as probe, \
+                    patch.dict(worker.os.environ, DENO_DIR=str(source)):
+                self.assertEqual(worker.prepare_cli(root), str(launcher))
+                probe.assert_called_once_with([str(launcher), '--version'], text=True,
+                                              stderr=subprocess.STDOUT, timeout=60)
+            cache = root / '.openneuro-deno-cache'
+            self.assertEqual(json.loads((cache / '.seeded').read_text())['version'], 'openneuro 5.9.1')
+            self.assertEqual((cache / 'module').read_text(), 'old')
+            (source / 'module').write_text('new')
+            with patch.object(worker.shutil, 'which', return_value=str(launcher)), \
+                    patch.object(worker.subprocess, 'check_output', return_value='openneuro 6.0.0\n'), \
+                    patch.dict(worker.os.environ, DENO_DIR=str(source)):
+                worker.prepare_cli(root)
+            self.assertEqual((cache / 'module').read_text(), 'new')
+            self.assertEqual(json.loads((cache / '.seeded').read_text())['version'], 'openneuro 6.0.0')
+
+    def test_deno_lockfile_relocated_and_annex_uses_wrapper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / 'image-config'
+            config.mkdir()
+            (config / 'deno.json').write_text('{"workspace": []}')
+            (config / 'deno.lock').write_text('original lock')
+            launcher = root / 'installed-openneuro'
+            launcher.write_text('#!/bin/sh\nexec deno run --allow-all --config ' +
+                                worker.shlex.quote(str(config / 'deno.json')) +
+                                ' jsr:@openneuro/cli "$@"\n')
+            binary = root / 'deno'
+            binary.write_text('#!/usr/bin/python3\nimport pathlib, sys\n'
+                              'config = pathlib.Path(sys.argv[sys.argv.index("--config") + 1])\n'
+                              '(config.parent / "deno.lock").write_text("updated lock")\n')
+            binary.chmod(0o755)
+            cache = root / 'cache'
+            cache.mkdir()
+            with patch.dict(worker.os.environ, PATH=str(root) + ':' + worker.os.environ['PATH']):
+                wrapper = worker.writable_cli(str(launcher), cache, {'version': 'test'})
+                self.assertEqual(worker.shutil.which('openneuro'), wrapper)
+                subprocess.run([wrapper, 'download'], check=True)
+                self.assertEqual((Path(wrapper).parent / 'config' / 'deno.lock').read_text(), 'updated lock')
+                self.assertEqual((config / 'deno.lock').read_text(), 'original lock')
+                self.assertEqual(worker.writable_cli(str(launcher), cache, {'version': 'test'}), wrapper)
+                self.assertEqual((Path(wrapper).parent / 'config' / 'deno.lock').read_text(), 'updated lock')
+    def test_missing_cli_has_no_network_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(worker.shutil, 'which', return_value=None), \
+                patch.object(worker.subprocess, 'check_output') as probe:
+            with self.assertRaisesRegex(RuntimeError, 'no openneuro executable'):
+                worker.prepare_cli(Path(tmp))
+            probe.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()
