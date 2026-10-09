@@ -221,6 +221,12 @@ class DownloadTests(unittest.TestCase):
         self.assertFalse(any(event == 'DONE' and message.startswith('phase=verify ') for event, message in messages))
         self.assertTrue(any(event == 'FAILED' and 'phase=verify ' in message and 'resume_phase=get' in message
                             for event, message in messages))
+    def test_datalad_backend_skips_aws(self):
+        with patch.object(worker, 'aws_prefetch') as prefetch:
+            worker.download('ds002721', self.root, 1, backend='datalad')
+        prefetch.assert_not_called()
+        self.assert_export()
+
     def test_invalid_links(self):
         repo = self.root / 'data'
         repo.mkdir()
@@ -305,7 +311,7 @@ class DatasetParallelTests(unittest.TestCase):
         active = 0
         peak = 0
         calls = []
-        def fake_download(spec, output, jobs, cli):
+        def fake_download(spec, output, jobs, cli, backend, stop):
             nonlocal active, peak
             with guard:
                 active += 1

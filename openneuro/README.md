@@ -1,6 +1,6 @@
 # OpenNeuro 批量下载与续传
 
-通过 Apptainer/Singularity 容器，用 Deno OpenNeuro CLI 获取仓库，再由 DataLad 补齐数据。校验完成后，把符号链接复制为独立文件并删除 `.git`。中断后重新执行相同命令，即可从保存的阶段继续。
+通过 Apptainer/Singularity 容器，用 Deno OpenNeuro CLI 获取指定快照；默认由 AWS CLI 下载有历史版本映射的对象，再由 DataLad 补齐其余数据。校验完成后，把符号链接复制为独立文件并删除 `.git`。中断后重新执行相同命令，即可从保存的阶段继续。
 
 ## 文件与环境
 
@@ -12,7 +12,7 @@
 
 在 **Linux 服务器**上运行，宿主机需要 Bash 和 Apptainer 或 Singularity。脚本优先使用 Apptainer。可只把 Bash 入口放到服务器。若同目录缺少 `download-openneuro.py`，首次运行会从本仓库 GitHub `main` 分支下载；本地已存在时直接使用，不自动覆盖或更新。也可以手动将两个脚本放在同一目录；Windows 目录 `D:\workspace\scripts\openneuro` 用于存放代码，下面的命令应在 Linux 执行。
 
-默认容器为 `/home/container/download-tools.sif`，其中需要 Deno、DataLad、Git、git-annex、Python 3.11 或以上版本，以及 `git-annex-remote-openneuro`。宿主机无需安装 Python 或 DataLad。脚本直接调用容器 PATH 中已安装的 `openneuro`（Deno 安装的启动器），不固定或自动升级 CLI 版本。启动时执行 `openneuro --version` 并显示实际版本；容器更换 CLI 后，会重新导入对应的 Deno 缓存。对于 Deno 安装生成的启动器，还会把配置、`deno.lock` 和相关依赖复制到可写缓存，并让下载命令与 annex 后端使用同一启动器，避免向只读 SIF 写入锁文件。CLI 版本与数据集版本号无关。缺少 `openneuro` 时会明确报错。
+默认容器为 `/home/container/download-tools.sif`，其中需要 Deno、DataLad、Git、git-annex、Python 3.11 或以上版本；AWS 优先模式使用容器中的 AWS CLI，缺少时自动退回 DataLad。另外需要 `git-annex-remote-openneuro`。宿主机无需安装 Python 或 DataLad。脚本直接调用容器 PATH 中已安装的 `openneuro`（Deno 安装的启动器），不固定或自动升级 CLI 版本。启动时执行 `openneuro --version` 并显示实际版本；容器更换 CLI 后，会重新导入对应的 Deno 缓存。对于 Deno 安装生成的启动器，还会把配置、`deno.lock` 和相关依赖复制到可写缓存，并让下载命令与 annex 后端使用同一启动器，避免向只读 SIF 写入锁文件。CLI 版本与数据集版本号无关。缺少 `openneuro` 时会明确报错。
 
 ## 使用示例
 
@@ -35,7 +35,7 @@ bash download-openneuro.sh \
   ds002721v1.0.3 ds003505
 ```
 
-中断后，在相同输出目录重新执行原命令。无须添加续传选项；可以调整 `-j`。
+中断后，在相同输出目录重新执行原命令。无须添加续传选项；可以调整 `-j`、`-p` 和 `--backend`，仍使用已固定的快照。
 
 ```bash
 # 第一次运行，中途断网或 Ctrl+C
@@ -70,7 +70,7 @@ curl -fsSL https://raw.githubusercontent.com/Omni-NCC/scripts/main/openneuro/dow
 ## 参数
 
 ```text
-bash download-openneuro.sh [-o OUTPUT] [-j JOBS] [-p DATASET_JOBS] ID [ID ...]
+bash download-openneuro.sh [-o OUTPUT] [-j JOBS] [-p DATASET_JOBS] [--backend aws|datalad] ID [ID ...]
 ```
 
 所有选项放在第一个 ID 前面。
@@ -80,6 +80,7 @@ bash download-openneuro.sh [-o OUTPUT] [-j JOBS] [-p DATASET_JOBS] ID [ID ...]
 | `-o` / `--output` | 调用时的当前目录 | 输出目录，不存在时创建 |
 | `-j` / `--jobs` | `4` | 每个数据集内的文件下载并发数，必须为正整数 |
 | `-p` / `--dataset-jobs` | `1` | 同时处理的数据集数，必须为正整数；默认顺序执行 |
+| `--backend` | `aws` | `aws`：AWS 优先、DataLad 补漏；`datalad`：直接使用原下载方式 |
 | `-h` / `--help` | — | 显示帮助 |
 
 替换容器路径：
@@ -90,6 +91,30 @@ OPENNEURO_CONTAINER=/path/to/download-tools.sif \
 ```
 
 脚本目录和输出目录不能含逗号或冒号，含空格的路径须加引号。默认连接 `https://openneuro.org`；若设置 `OPENNEURO_URL`，恢复时须保持同一地址。需要认证时，通过 `OPENNEURO_API_KEY` 环境变量提供密钥，版本查询和 CLI 均可使用它；不要把密钥写进脚本或提交到 Git。
+
+## AWS 优先下载与 DataLad 补漏
+
+默认流程为：Deno 获取快照 → AWS 下载并导入 annex → DataLad 补漏 → 全量校验 → 转为实体文件并删除 `.git`。
+
+```bash
+# 默认使用 AWS 优先模式：两个数据集并行，每个最多 8 路传输
+bash download-openneuro.sh -o /data/openneuro -p 2 -j 8 \
+  ds003505v1.1.2 ds004789
+
+# 显式选择原来的 DataLad 下载方式；也可用于恢复同一任务
+bash download-openneuro.sh -o /data/openneuro --backend datalad -j 4 \
+  ds003505v1.1.2
+```
+
+AWS 阶段从本地 `git-annex` 分支的 S3 元数据提取 `key` 和 `VersionId`，只读取公开 `openneuro.org` 桶，并使用 `--no-sign-request`，不需要 AWS 凭证。它不是 `aws s3 sync`：即使当前对象已被删除标记隐藏，也会请求映射指向的历史版本。文件按 annex key 去重，支持 MD5、SHA1、SHA256、SHA512 内容哈希（含相应 `E` 形式）。大小和哈希验证通过后，才通过 `git annex reinject --guesskeys` 串行批量入库。
+
+缺少 AWS CLI、没有可解析的 S3 映射、不支持的 annex key 或 AWS 下载失败时，由后续 `datalad get` 补齐。内容不匹配时不入库；可尝试同一 annex key 的其他已记录版本。传输错误使用 AWS 有限重试，随后交给 DataLad，避免针对同一大文件的每个历史版本反复重下。连接和读取有超时，但不对仍有进展的单文件下载设置总时长上限。
+
+AWS 临时内容位于 `.openneuro-work/<输入 ID>/aws-cache/`，已完整下载但尚未入库的内容在恢复时重新校验并复用；已经入库的对象直接跳过。未完成文件通常重新下载，**不承诺字节级续传**。`aws-manifest.json` 保存映射，`aws-summary.json` 保存本次 AWS 阶段统计；顶层恢复阶段仍为 `get`，兼容旧状态文件。
+
+`-j` 同时用于 AWS 文件并发和后续 DataLad 并发，两者依次执行。当前 AWS 实现使用 `s3api get-object --version-id`，每个对象一路传输，未实现单个大文件的多段并行。已有测速中小文件组表现较好，大文件和全量测试尚不足以证明稳定提速，因此不保证比 DataLad 更快。
+
+升级时须一起更新 Bash 和 Python 脚本。管道调用缓存的 `.openneuro-tools/download-openneuro.py` 不会自动更新，已有缓存也须手动更新，否则旧 Python 可能不识别 `--backend`。
 
 ## 数据集并行
 
@@ -144,7 +169,7 @@ openneuro download --version 1.0.3 ds002721 ds002721
 | --- | --- |
 | 查询版本 | 重试查询；保存成功后固定版本 |
 | Deno 下载仓库 | 在相同目录重试固定版本的 CLI 命令，利用 CLI 对已有仓库的处理 |
-| DataLad 下载数据 | 跳过 Deno，重新运行 `datalad get`，复用已完成的 annex 对象 |
+| AWS / DataLad 下载数据 | 跳过 Deno；AWS 复用完整缓存及已入库对象，然后运行 `datalad get` 补漏 |
 | annex 校验 | 重试校验；校验命令失败后，下次先重新运行 `get`，补回被隔离的损坏对象 |
 | 链接实体化 | 校验已转换文件，继续复制剩余链接，不再下载数据 |
 | 删除 `.git` | 依据已保存清单验证实体文件，再继续清理；支持 `.git` 已部分或全部删除的情况 |
@@ -157,7 +182,7 @@ openneuro download --version 1.0.3 ds002721 ds002721
 
 ## 校验、空间与保护
 
-处理顺序为：获取仓库 → DataLad 补全 → `git annex fsck --numcopies=1` → 保存 SHA-256 清单 → 链接复制为实际文件 → 校验 → 删除 `.git` → 移到最终目录。
+处理顺序为：获取仓库 → AWS 下载并入库（默认）→ DataLad 补全 → `git annex fsck --numcopies=1` → 保存 SHA-256 清单 → 链接复制为实际文件 → 校验 → 删除 `.git` → 移到最终目录。
 
 复制出的文件彼此独立，不是硬链接。删除 `.git` 前会检查所有数据文件的路径、大小和哈希。恢复实体化时，如果已经转换的文件被改动，会停止处理，不删除 `.git`。完整性检查会多次读取数据，大数据集的校验和转换需要时间。
 
@@ -183,7 +208,7 @@ openneuro download --version 1.0.3 ds002721 ds002721
 
 阶段为 `resolve`（确定版本）、`clone`（获取仓库）、`get`（下载内容）、`verify`（完整性校验）、`materialize`（转为实体文件）、`cleanup`（删除 Git 元数据）、`publish`（移到最终目录）。每阶段成功结束并保存恢复状态后输出 `DONE` 和本次执行耗时；失败输出 `FAILED`，包含失败阶段、耗时、错误和恢复位置，不会误记为成功。
 
-`COMMAND` 记录外部命令，`OUTPUT` 标识命令输出，`RESUME` 记录起始阶段，`SKIP` 表示已有完成记录，`COMPLETE` 表示数据集成功结束，`BATCH_DONE` 汇总成功和失败数量。恢复后的耗时仅统计当前这次运行。子程序自身未输出进度时，阶段中间仍可能暂时没有新日志；这里没有额外的定时进度采样。
+`COMMAND` 记录外部命令，`OUTPUT` 标识命令输出，`RESUME` 记录起始阶段，`SKIP` 表示已有完成记录，`COMPLETE` 表示数据集成功结束，`BATCH_DONE` 汇总成功和失败数量。恢复后的耗时仅统计当前这次运行。AWS 阶段增加 `AWS_START`、`AWS_PROGRESS`、`AWS_FALLBACK`、`AWS_DONE` 和 `AWS_SKIP`。每约 60 秒输出一次本轮净下载字节增量速度（包括在途文件，不是网卡流量；重试丢弃临时内容时可能下降），并保存统计。入库或哈希校验繁忙时日志间隔可能延长。DataLad 子程序自身未输出进度时，该阶段仍可能暂时没有新日志。
 ## 测试
 
 在 Linux 服务器的脚本目录运行：
@@ -198,3 +223,15 @@ apptainer exec \
 只有 Singularity 时，将 `apptainer` 替换为 `singularity`。
 
 测试使用临时合成仓库，执行真实的 DataLad/git-annex 本地操作，覆盖版本固定、恢复阶段、实体化校验、已有输出保护和并发锁。OpenNeuro CLI 下载与 latest 查询由测试替代，因此不代表已验证真实数据集的完整网络下载。
+
+
+AWS 和入口测试也可分别执行：
+
+```bash
+apptainer exec --bind "$PWD:/openneuro-scripts:ro" /home/container/download-tools.sif \
+  python3 -B /openneuro-scripts/test-download-openneuro-aws.py
+apptainer exec --bind "$PWD:/openneuro-scripts:ro" /home/container/download-tools.sif \
+  python3 -B /openneuro-scripts/test-download-openneuro-bootstrap.py
+```
+
+AWS 测试使用真实本地 git-annex 仓库和替代的传输命令，覆盖版本增删记录、对象去重、哈希拒绝、入库、缓存恢复和进程取消；不会下载真实 OpenNeuro 数据。

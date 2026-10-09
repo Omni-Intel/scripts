@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: bash download-openneuro.sh [-o OUTPUT] [-j JOBS] [-p DATASET_JOBS] ds002721 [ds003505v1.1.2 ...]
+# Usage: bash download-openneuro.sh [-o OUTPUT] [-j JOBS] [-p DATASET_JOBS] [--backend aws|datalad] ds002721 [ds003505v1.1.2 ...]
 set -euo pipefail
 script_dir=''
 if [[ -n ${BASH_SOURCE[0]:-} ]]; then
@@ -9,14 +9,17 @@ image=${OPENNEURO_CONTAINER:-/home/container/download-tools.sif}
 output=$PWD
 jobs=4
 dataset_jobs=1
+backend=aws
 while (($#)); do
     case "$1" in
         -o|--output) output=${2:?Missing output directory}; shift 2 ;;
         -j|--jobs) jobs=${2:?Missing job count}; shift 2 ;;
         -p|--dataset-jobs) dataset_jobs=${2:?Missing dataset job count}; shift 2 ;;
+        --backend) backend=${2:?Missing backend}; shift 2 ;;
         -h|--help)
-            echo "Usage: bash $0 [-o OUTPUT] [-j JOBS] [-p DATASET_JOBS] ID [ID ...]"
+            echo "Usage: bash $0 [-o OUTPUT] [-j JOBS] [-p DATASET_JOBS] [--backend aws|datalad] ID [ID ...]"
             echo "-p: concurrent datasets (default 1); -j: transfers per dataset (default 4)."
+            echo "--backend: aws (default, with DataLad completion) or datalad."
             echo "IDs: ds002721 (latest snapshot), ds002721v1.0.3 (specific version)."
             echo "Set OPENNEURO_CONTAINER to override /home/container/download-tools.sif."
             echo "Interrupted downloads resume automatically in the same output directory."
@@ -29,6 +32,7 @@ done
 (($#)) || { echo 'At least one dataset ID is required.' >&2; exit 2; }
 [[ $jobs =~ ^[1-9][0-9]*$ ]] || { echo 'Jobs must be a positive integer.' >&2; exit 2; }
 [[ $dataset_jobs =~ ^[1-9][0-9]*$ ]] || { echo "Dataset jobs must be a positive integer." >&2; exit 2; }
+[[ $backend == aws || $backend == datalad ]] || { echo "Backend must be aws or datalad." >&2; exit 2; }
 for id in "$@"; do
     [[ $id =~ ^ds[0-9]{6}(v[0-9]+\.[0-9]+\.[0-9]+)?$ ]] || {
         echo "Invalid dataset ID: $id" >&2; exit 2;
@@ -84,4 +88,4 @@ fi
 exec "$runtime" exec \
     --bind "$output:/downloads" --bind "$script_dir:/download-script:ro" \
     --pwd /downloads "$image" \
-    python3 -B /download-script/download-openneuro.py --jobs "$jobs" --dataset-jobs "$dataset_jobs" "$@" </dev/null
+    python3 -B /download-script/download-openneuro.py --jobs "$jobs" --dataset-jobs "$dataset_jobs" --backend "$backend" "$@" </dev/null

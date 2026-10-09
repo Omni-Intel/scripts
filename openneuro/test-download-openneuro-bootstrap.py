@@ -22,12 +22,13 @@ if '-c' in args:
     command[-1] = str(pathlib.Path(root) / pathlib.Path(command[-1]).name)
     sys.exit(subprocess.call(command))
 assert args[args.index('--dataset-jobs') + 1] == os.environ.get('EXPECTED_DATASET_JOBS', '1')
+assert args[args.index('--backend') + 1] == os.environ.get('EXPECTED_BACKEND', 'aws')
 sys.exit(0)
 '''
 
 
 class BootstrapTests(unittest.TestCase):
-    def check_case(self, mode='ok', local=False, parallel=1, piped=False):
+    def check_case(self, mode='ok', local=False, parallel=1, piped=False, backend=None):
         with tempfile.TemporaryDirectory(prefix='bootstrap test ') as tmp:
             root = Path(tmp)
             shell = root / 'download-openneuro.sh'
@@ -44,8 +45,8 @@ class BootstrapTests(unittest.TestCase):
                 worker.write_text('# local worker\n')
             calls = root / 'calls'
             env = dict(os.environ, PATH=str(root) + ':' + os.environ['PATH'],
-                       OPENNEURO_CONTAINER=str(image), CALLS=str(calls), DOWNLOAD_MODE=mode, EXPECTED_DATASET_JOBS=str(parallel))
-            result = subprocess.run(['bash', *(['-s', '--'] if piped else [str(shell)]), '-o', str(root / 'output'), '-p', str(parallel), 'ds002721'],
+                       OPENNEURO_CONTAINER=str(image), CALLS=str(calls), DOWNLOAD_MODE=mode, EXPECTED_DATASET_JOBS=str(parallel), EXPECTED_BACKEND=backend or 'aws')
+            result = subprocess.run(['bash', *(['-s', '--'] if piped else [str(shell)]), '-o', str(root / 'output'), '-p', str(parallel), *(['--backend', backend] if backend else []), 'ds002721'],
                                     env=env, text=True, capture_output=True,
                                     input=shell.read_text() if piped else None)
             invocations = calls.read_text().splitlines()
@@ -62,6 +63,9 @@ class BootstrapTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(worker.exists())
                 self.assertNotIn('worker', invocations)
+
+    def test_datalad_backend_forwarded(self):
+        self.check_case(local=True, backend='datalad')
 
     def test_stdin_downloads_worker(self):
         self.check_case(piped=True, parallel=4)
