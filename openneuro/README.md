@@ -108,11 +108,11 @@ bash download-openneuro.sh -o /data/openneuro --backend datalad -j 4 \
 
 AWS 阶段从本地 `git-annex` 分支的 S3 元数据提取 `key` 和 `VersionId`，只读取公开 `openneuro.org` 桶，并使用 `--no-sign-request`，不需要 AWS 凭证。它不是 `aws s3 sync`：即使当前对象已被删除标记隐藏，也会请求映射指向的历史版本。文件按 annex key 去重，支持 MD5、SHA1、SHA256、SHA512 内容哈希（含相应 `E` 形式）。大小和哈希验证通过后，才通过 `git annex reinject --guesskeys` 串行批量入库。
 
-缺少 AWS CLI、没有可解析的 S3 映射、不支持的 annex key 或 AWS 下载失败时，由后续 `datalad get` 补齐。内容不匹配时不入库；可尝试同一 annex key 的其他已记录版本。传输错误使用 AWS 有限重试，随后交给 DataLad，避免针对同一大文件的每个历史版本反复重下。连接和读取有超时，但不对仍有进展的单文件下载设置总时长上限。
+缺少 AWS CLI、没有可解析的 S3 映射、不支持的 annex key 或 AWS 下载失败时，由后续 `datalad get` 补齐。内容不匹配时不入库；可尝试同一 annex key 的其他已记录版本。传输错误使用 AWS 有限重试，随后交给 DataLad，避免针对同一大文件的每个历史版本反复重下。连接超时 15 秒、读取超时 60 秒；每 120 秒检查一次平均速度，低于 64 KiB/s 时终止当前请求。分块最多尝试 3 次，各次请求内部由 AWS CLI 有限重试。
 
-AWS 临时内容位于 `.openneuro-work/<输入 ID>/aws-cache/`，已完整下载但尚未入库的内容在恢复时重新校验并复用；已经入库的对象直接跳过。未完成文件通常重新下载，**不承诺字节级续传**。`aws-manifest.json` 保存映射，`aws-summary.json` 保存本次 AWS 阶段统计；顶层恢复阶段仍为 `get`，兼容旧状态文件。
+AWS 临时内容位于 `.openneuro-work/<输入 ID>/aws-cache/`，已完整下载但尚未入库的内容在恢复时重新校验并复用；已经入库的对象直接跳过。大于 32 MiB 的文件按 32 MiB 分块下载；成功分块保存在同目录的 `chunks/` 中，并按 annex key、S3 Key 和 VersionId 隔离。恢复时验证分块大小和本地 SHA-256 记录，复用完整分块；未完成块重新下载。旧版完整缓存继续复用，旧版未完成的整文件缓存不会自动转换成分块。`aws-manifest.json` 保存映射，`aws-summary.json` 保存本次 AWS 阶段统计；顶层恢复阶段仍为 `get`，兼容旧状态文件。
 
-`-j` 同时用于 AWS 文件并发和后续 DataLad 并发，两者依次执行。当前 AWS 实现使用 `s3api get-object --version-id`，每个对象一路传输，未实现单个大文件的多段并行。已有测速中小文件组表现较好，大文件和全量测试尚不足以证明稳定提速，因此不保证比 DataLad 更快。
+`-j` 同时用于 AWS 文件并发和后续 DataLad 并发，两者依次执行。AWS 使用区域双栈端点 `https://s3.dualstack.us-east-1.amazonaws.com`，支持 IPv4/IPv6，实际路由由系统决定。使用 `s3api get-object --version-id --range`，单个大文件最多 4 块并行；每个数据集所有 AWS 请求共享 `-j` 个连接名额，总连接数最多 `-p × -j`。分块顺序合并后仍须验证完整 annex 哈希才能入库。已有测速中小文件组表现较好，大文件和全量测试尚不足以证明稳定提速，因此不保证比 DataLad 更快。
 
 升级时须一起更新 Bash 和 Python 脚本。管道调用缓存的 `.openneuro-tools/download-openneuro.py` 不会自动更新，已有缓存也须手动更新，否则旧 Python 可能不识别 `--backend`。
 
@@ -208,7 +208,7 @@ openneuro download --version 1.0.3 ds002721 ds002721
 
 阶段为 `resolve`（确定版本）、`clone`（获取仓库）、`get`（下载内容）、`verify`（完整性校验）、`materialize`（转为实体文件）、`cleanup`（删除 Git 元数据）、`publish`（移到最终目录）。每阶段成功结束并保存恢复状态后输出 `DONE` 和本次执行耗时；失败输出 `FAILED`，包含失败阶段、耗时、错误和恢复位置，不会误记为成功。
 
-`COMMAND` 记录外部命令，`OUTPUT` 标识命令输出，`RESUME` 记录起始阶段，`SKIP` 表示已有完成记录，`COMPLETE` 表示数据集成功结束，`BATCH_DONE` 汇总成功和失败数量。恢复后的耗时仅统计当前这次运行。AWS 阶段增加 `AWS_START`、`AWS_PROGRESS`、`AWS_FALLBACK`、`AWS_DONE` 和 `AWS_SKIP`。每约 60 秒输出一次本轮净下载字节增量速度（包括在途文件，不是网卡流量；重试丢弃临时内容时可能下降），并保存统计。入库或哈希校验繁忙时日志间隔可能延长。DataLad 子程序自身未输出进度时，该阶段仍可能暂时没有新日志。
+`COMMAND` 记录外部命令，`OUTPUT` 标识命令输出，`RESUME` 记录起始阶段，`SKIP` 表示已有完成记录，`COMPLETE` 表示数据集成功结束，`BATCH_DONE` 汇总成功和失败数量。恢复后的耗时仅统计当前这次运行。AWS 阶段增加 `AWS_START`、`AWS_PROGRESS`、`AWS_FALLBACK`、`AWS_DONE` 和 `AWS_SKIP`。每约 60 秒输出一次缓存净增长速度（包括分块及在途文件，不是网卡流量；恢复时首个区间可能包含已有分块，重试或清理缓存时可能下降），并保存统计。入库或哈希校验繁忙时日志间隔可能延长。DataLad 子程序自身未输出进度时，该阶段仍可能暂时没有新日志。
 ## 测试
 
 在 Linux 服务器的脚本目录运行：

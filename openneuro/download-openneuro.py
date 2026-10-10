@@ -22,6 +22,11 @@ import urllib.request
 import uuid
 
 CLI = 'openneuro'
+AWS_ENDPOINT = 'https://s3.dualstack.us-east-1.amazonaws.com'
+AWS_CHUNK_SIZE = 32 * 1024**2
+AWS_CHUNK_WORKERS = 4
+AWS_SLOW_WINDOW = 120
+AWS_MIN_RATE = 64 * 1024
 RECEIPT = '.openneuro-download.json'
 PHASES = ('resolve', 'clone', 'get', 'verify', 'materialize', 'cleanup', 'publish', 'complete')
 
@@ -378,9 +383,10 @@ class DownloadStop:
 
 
 def aws_command(args, cwd, stop):
-    env = dict(os.environ, AWS_MAX_ATTEMPTS='3', AWS_EC2_METADATA_DISABLED='true', AWS_PAGER='')
-    # A file avoids pipe blockage while polling for cancellation. No total transfer
-    # deadline: a slow but progressing large object must not be repeatedly restarted.
+    env = dict(os.environ, AWS_MAX_ATTEMPTS='3', AWS_RETRY_MODE='standard', AWS_EC2_METADATA_DISABLED='true', AWS_PAGER='')
+    # Check sustained throughput as well as socket timeouts. Range retries preserve other chunks.
+    destination = Path(args[-1]) if '--bucket' in args else None
+    sampled_at, sampled_bytes = time.monotonic(), 0
     with tempfile.TemporaryFile() as output:
         process = subprocess.Popen(args, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                    stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
@@ -388,6 +394,12 @@ def aws_command(args, cwd, stop):
             while process.poll() is None:
                 if stop.wait(0.25):
                     raise InterruptedError('AWS download cancelled')
+                now = time.monotonic()
+                if destination is not None and now - sampled_at >= AWS_SLOW_WINDOW:
+                    size = destination.stat().st_size if destination.exists() else 0
+                    if (size - sampled_bytes) / (now - sampled_at) < AWS_MIN_RATE:
+                        raise RuntimeError('AWS sustained throughput below 64 KiB/s')
+                    sampled_at, sampled_bytes = now, size
             if process.returncode:
                 output.seek(max(0, output.tell() - 2000))
                 message = output.read().decode(errors='replace')
@@ -405,7 +417,100 @@ def aws_command(args, cwd, stop):
                     process.wait()
 
 
-def aws_fetch(item, cache, stop):
+def aws_args(candidate):
+    return ['aws', 's3api', 'get-object', '--bucket', 'openneuro.org',
+            '--key', candidate['s3_key'], '--version-id', candidate['version_id'],
+            '--no-sign-request', '--region', 'us-east-1',
+            '--endpoint-url', AWS_ENDPOINT,
+            '--cli-connect-timeout', '15', '--cli-read-timeout', '60']
+
+
+def aws_limited(args, cache, stop, slots):
+    while not slots.acquire(timeout=0.25):
+        if stop.is_set():
+            raise InterruptedError('AWS download cancelled')
+    try:
+        if stop.is_set():
+            raise InterruptedError('AWS download cancelled')
+        aws_command(args, cache, stop)
+    finally:
+        slots.release()
+
+
+def aws_parts_dir(cache, key, candidate):
+    identity = json.dumps(candidate, sort_keys=True).encode()
+    return cache / 'chunks' / key / hashlib.sha256(identity).hexdigest()
+
+
+def aws_ranges(candidate, key, size, cache, partial, stop, slots):
+    """Persist successful ranges with local SHA-256 receipts, bound to key/version."""
+    parts = aws_parts_dir(cache, key, candidate)
+    for directory in (cache / 'chunks', parts.parent, parts):
+        real_directory(directory)
+    local_stop = DownloadStop(stop)
+    count = (size + AWS_CHUNK_SIZE - 1) // AWS_CHUNK_SIZE
+
+    def fetch(index):
+        start = index * AWS_CHUNK_SIZE
+        end = min(size, start + AWS_CHUNK_SIZE) - 1
+        # Include offsets: a future chunk-size change cannot reuse different ranges.
+        part = parts / f'{start}-{end}.part'
+        receipt = parts / f'{start}-{end}.json'
+        temporary = parts / f'{start}-{end}.tmp'
+        if any(p.is_symlink() for p in (part, receipt, temporary)):
+            raise RuntimeError('Refusing symlink in range cache')
+        if part.is_file() and receipt.is_file() and part.stat().st_size == end - start + 1:
+            try:
+                expected = json.loads(receipt.read_text())['sha256']
+                with part.open('rb') as stream:
+                    if hashlib.file_digest(stream, 'sha256').hexdigest() == expected:
+                        return part
+            except (ValueError, KeyError, TypeError):
+                pass
+        for attempt in range(3):
+            if local_stop.is_set():
+                raise InterruptedError('AWS download cancelled')
+            try:
+                temporary.unlink(missing_ok=True)
+                aws_limited(aws_args(candidate) + ['--range', f'bytes={start}-{end}', str(temporary)],
+                            cache, local_stop, slots)
+                if temporary.stat().st_size != end - start + 1:
+                    raise RuntimeError('S3 range length mismatch')
+                with temporary.open('rb') as stream:
+                    digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, part)
+                write_json(receipt, {'sha256': digest})
+                return part
+            except (OSError, RuntimeError):
+                if local_stop.is_set() or attempt == 2:
+                    raise
+                local_stop.wait(attempt + 1)
+        raise RuntimeError('Range retries exhausted')
+
+    pool = ThreadPoolExecutor(max_workers=AWS_CHUNK_WORKERS, thread_name_prefix='s3-range')
+    futures = {pool.submit(fetch, index): index for index in range(count)}
+    ordered = {}
+    try:
+        for future in as_completed(futures):
+            ordered[futures[future]] = future.result()
+        with partial.open('wb') as target:
+            for index in range(count):
+                if local_stop.is_set():
+                    raise InterruptedError('AWS download cancelled')
+                with ordered[index].open('rb') as source:
+                    shutil.copyfileobj(source, target, 1024**2)
+            target.flush()
+            os.fsync(target.fileno())
+    except BaseException:
+        local_stop.set()
+        raise
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
+def aws_fetch(item, cache, stop, slots=None):
+    slots = slots if slots is not None else threading.BoundedSemaphore(AWS_CHUNK_WORKERS)
     key = item['key']
     ready, partial = cache / key, cache / 'partial' / key
     if ready.is_symlink() or partial.is_symlink():
@@ -424,11 +529,11 @@ def aws_fetch(item, cache, stop):
             raise InterruptedError('AWS download cancelled')
         partial.unlink(missing_ok=True)
         try:
-            aws_command(['aws', 's3api', 'get-object', '--bucket', 'openneuro.org',
-                         '--key', candidate['s3_key'], '--version-id', candidate['version_id'],
-                         '--no-sign-request', '--region', 'us-east-1',
-                         '--endpoint-url', 'https://s3.amazonaws.com',
-                         '--cli-connect-timeout', '20', '--cli-read-timeout', '60', str(partial)], cache, stop)
+            size = annex_hash(key)[1]
+            if size is not None and size > AWS_CHUNK_SIZE:
+                aws_ranges(candidate, key, size, cache, partial, stop, slots)
+            else:
+                aws_limited(aws_args(candidate) + [str(partial)], cache, stop, slots)
         except InterruptedError:
             raise
         except (OSError, RuntimeError) as error:
@@ -439,12 +544,18 @@ def aws_fetch(item, cache, stop):
         if not annex_matches(partial, key):
             errors.append('Downloaded object does not match annex hash/size')
             partial.unlink(missing_ok=True)
+            parts = aws_parts_dir(cache, key, candidate)
+            if parts.exists():
+                shutil.rmtree(parts)
             continue
         size = partial.stat().st_size
         with partial.open('rb') as stream:
             os.fsync(stream.fileno())
         os.replace(partial, ready)
         sync_dir(cache)
+        parts_root = cache / 'chunks' / key
+        if parts_root.exists():
+            shutil.rmtree(parts_root)
         return {'key': key, 'ok': True, 'reused': False, 'bytes': size}
     partial.unlink(missing_ok=True)
     return {'key': key, 'ok': False, 'errors': errors}
@@ -477,6 +588,7 @@ def aws_prefetch(dataset, stage, accession, jobs, stop=None):
     log(f'eligible={len(eligible)} missing_objects={len(items)} jobs={jobs}', 'AWS_START')
     ready = []; ready_bytes = 0
     pool = ThreadPoolExecutor(max_workers=jobs, thread_name_prefix='aws')
+    slots = threading.BoundedSemaphore(jobs)
     pending = {}; iterator = iter(eligible)
     last_report = time.monotonic(); last_bytes = 0
 
@@ -485,7 +597,7 @@ def aws_prefetch(dataset, stage, accession, jobs, stop=None):
             item = next(iterator, None)
             if item is None:
                 break
-            pending[pool.submit(aws_fetch, item, cache, stop)] = item
+            pending[pool.submit(aws_fetch, item, cache, stop, slots)] = item
 
     def inject():
         nonlocal ready_bytes
@@ -518,10 +630,23 @@ def aws_prefetch(dataset, stage, accession, jobs, stop=None):
             if now - last_report >= 60:
                 partial_bytes = 0
                 for item in pending.values():
-                    try:
-                        partial_bytes += (cache / 'partial' / item['key']).stat().st_size
-                    except FileNotFoundError:
-                        pass
+                    sizes = []
+                    paths = [cache / 'partial' / item['key']]
+                    chunk_root = cache / 'chunks' / item['key']
+                    chunks = 0
+                    for path in chunk_root.rglob('*'):
+                        if path.suffix not in ('.part', '.tmp') or path.is_symlink():
+                            continue
+                        try:
+                            chunks += path.stat().st_size
+                        except FileNotFoundError:
+                            pass
+                    for path in paths:
+                        try:
+                            sizes.append(path.stat().st_size)
+                        except FileNotFoundError:
+                            pass
+                    partial_bytes += max([chunks, *sizes])
                 total = stats['downloaded_bytes'] + partial_bytes
                 log(f'downloaded={stats["downloaded"]} reused={stats["reused"]} '
                     f'fallback={stats["fallback"]} net_bytes={total} '

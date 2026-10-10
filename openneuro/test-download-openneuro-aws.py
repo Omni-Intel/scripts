@@ -184,5 +184,113 @@ class PrefetchTests(unittest.TestCase):
             worker.aws_fetch(item, self.cache, threading.Event())
         self.assertEqual(outside.read_bytes(), b'preserve')
 
+
+class RangeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cache = Path(self.tmp.name)
+        (self.cache / 'partial').mkdir()
+        self.payload = bytes(range(100))
+        self.key = 'SHA256E-s100--' + hashlib.sha256(self.payload).hexdigest()
+        self.candidate = {'s3_key': 'ds000001/a', 'version_id': 'v1'}
+        self.item = {'key': self.key, 'candidates': [self.candidate]}
+        self.calls = []
+        p = patch.object(worker, 'AWS_CHUNK_SIZE', 32)
+        p.start(); self.addCleanup(p.stop)
+
+    def transfer(self, args, cwd, stop):
+        self.assertEqual(args[args.index('--endpoint-url') + 1],
+                         'https://s3.dualstack.us-east-1.amazonaws.com')
+        span = args[args.index('--range') + 1].split('=')[1]
+        start, end = map(int, span.split('-'))
+        self.calls.append((start, end))
+        Path(args[-1]).write_bytes(self.payload[start:end + 1])
+
+    def test_ranges_include_last_byte_and_importable_hash(self):
+        with patch.object(worker, 'aws_command', self.transfer):
+            result = worker.aws_fetch(self.item, self.cache, threading.Event())
+        self.assertTrue(result['ok'])
+        self.assertEqual(sorted(self.calls), [(0,31),(32,63),(64,95),(96,99)])
+        self.assertEqual((self.cache / self.key).read_bytes(), self.payload)
+        self.assertFalse((self.cache / 'chunks' / self.key).exists())
+
+    def seed(self):
+        parts = worker.aws_parts_dir(self.cache, self.key, self.candidate)
+        parts.mkdir(parents=True, exist_ok=True)
+        for start, end in [(0,31),(32,63),(64,95)]:
+            data = self.payload[start:end + 1]
+            (parts / f'{start}-{end}.part').write_bytes(data)
+            (parts / f'{start}-{end}.json').write_text(
+                json.dumps({'sha256': hashlib.sha256(data).hexdigest()}))
+        return parts
+
+    def test_resume_revalidates_completed_chunks(self):
+        self.seed()
+        with patch.object(worker, 'aws_command', self.transfer):
+            result = worker.aws_fetch(self.item, self.cache, threading.Event())
+        self.assertTrue(result['ok'])
+        self.assertEqual(self.calls, [(96,99)])
+
+    def test_corrupt_cached_chunk_is_redownloaded(self):
+        parts = self.seed()
+        (parts / '32-63.part').write_bytes(b'x' * 32)
+        with patch.object(worker, 'aws_command', self.transfer):
+            self.assertTrue(worker.aws_fetch(self.item, self.cache, threading.Event())['ok'])
+        self.assertEqual(sorted(self.calls), [(32,63),(96,99)])
+
+    def test_versions_do_not_share_ranges(self):
+        self.seed()
+        self.item['candidates'] = [dict(self.candidate, version_id='v2')]
+        with patch.object(worker, 'aws_command', self.transfer):
+            self.assertTrue(worker.aws_fetch(self.item, self.cache, threading.Event())['ok'])
+        self.assertEqual(len(self.calls), 4)
+
+    def test_failed_range_retains_successful_chunks_for_resume(self):
+        self.seed()
+        with patch.object(worker, 'aws_command', side_effect=RuntimeError('network')):
+            self.assertFalse(worker.aws_fetch(self.item, self.cache, threading.Event())['ok'])
+        with patch.object(worker, 'aws_command', self.transfer):
+            self.assertTrue(worker.aws_fetch(self.item, self.cache, threading.Event())['ok'])
+        self.assertEqual(self.calls, [(96,99)])
+
+    def test_connection_limit(self):
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+        def transfer(args, cwd, stop):
+            nonlocal active, peak
+            with lock:
+                active += 1; peak = max(peak, active)
+            try:
+                time.sleep(0.02)
+                self.transfer(args, cwd, stop)
+            finally:
+                with lock:
+                    active -= 1
+        with patch.object(worker, 'aws_command', transfer):
+            result = worker.aws_fetch(self.item, self.cache, threading.Event(),
+                                      threading.BoundedSemaphore(2))
+        self.assertTrue(result['ok'])
+        self.assertEqual(peak, 2)
+
+    def test_wrong_range_payload_never_imports(self):
+        def corrupt(args, cwd, stop):
+            self.transfer(args, cwd, stop)
+            p = Path(args[-1]); p.write_bytes(b'x' * p.stat().st_size)
+        with patch.object(worker, 'aws_command', corrupt):
+            result = worker.aws_fetch(self.item, self.cache, threading.Event())
+        self.assertFalse(result['ok'])
+        self.assertFalse((self.cache / self.key).exists())
+
+    def test_low_speed_kills_process(self):
+        args = [sys.executable, '-c', 'import time; time.sleep(60)',
+                '--bucket', 'unused', str(self.cache / 'slow')]
+        started = time.monotonic()
+        with patch.object(worker, 'AWS_SLOW_WINDOW', 0.1):
+            with self.assertRaisesRegex(RuntimeError, 'throughput'):
+                worker.aws_command(args, self.cache, threading.Event())
+        self.assertLess(time.monotonic() - started, 6)
+
 if __name__ == '__main__':
     unittest.main()
