@@ -8,7 +8,6 @@
 | --- | --- |
 | `download-openneuro.sh` | 使用入口，处理参数并启动容器 |
 | `download-openneuro.py` | 下载、恢复、校验和文件转换 |
-| `test-download-openneuro.py` | 容器内合成数据测试，不下载真实数据集 |
 
 在 **Linux 服务器**上运行，宿主机需要 Bash 和 Apptainer 或 Singularity。脚本优先使用 Apptainer。可只把 Bash 入口放到服务器。若同目录缺少 `download-openneuro.py`，首次运行会从本仓库 GitHub `main` 分支下载；本地已存在时直接使用，不自动覆盖或更新。也可以手动将两个脚本放在同一目录；Windows 目录 `D:\workspace\scripts\openneuro` 用于存放代码，下面的命令应在 Linux 执行。
 
@@ -209,29 +208,3 @@ openneuro download --version 1.0.3 ds002721 ds002721
 阶段为 `resolve`（确定版本）、`clone`（获取仓库）、`get`（下载内容）、`verify`（完整性校验）、`materialize`（转为实体文件）、`cleanup`（删除 Git 元数据）、`publish`（移到最终目录）。每阶段成功结束并保存恢复状态后输出 `DONE` 和本次执行耗时；失败输出 `FAILED`，包含失败阶段、耗时、错误和恢复位置，不会误记为成功。
 
 `COMMAND` 记录外部命令，`OUTPUT` 标识命令输出，`RESUME` 记录起始阶段，`SKIP` 表示已有完成记录，`COMPLETE` 表示数据集成功结束，`BATCH_DONE` 汇总成功和失败数量。恢复后的耗时仅统计当前这次运行。AWS 阶段增加 `AWS_START`、`AWS_PROGRESS`、`AWS_FALLBACK`、`AWS_DONE` 和 `AWS_SKIP`。每约 60 秒输出一次缓存净增长速度（包括分块及在途文件，不是网卡流量；恢复时首个区间可能包含已有分块，重试或清理缓存时可能下降），并保存统计。入库或哈希校验繁忙时日志间隔可能延长。DataLad 子程序自身未输出进度时，该阶段仍可能暂时没有新日志。
-## 测试
-
-在 Linux 服务器的脚本目录运行：
-
-```bash
-apptainer exec \
-  --bind "$PWD:/openneuro-scripts:ro" \
-  /home/container/download-tools.sif \
-  python3 -B /openneuro-scripts/test-download-openneuro.py
-```
-
-只有 Singularity 时，将 `apptainer` 替换为 `singularity`。
-
-测试使用临时合成仓库，执行真实的 DataLad/git-annex 本地操作，覆盖版本固定、恢复阶段、实体化校验、已有输出保护和并发锁。OpenNeuro CLI 下载与 latest 查询由测试替代，因此不代表已验证真实数据集的完整网络下载。
-
-
-AWS 和入口测试也可分别执行：
-
-```bash
-apptainer exec --bind "$PWD:/openneuro-scripts:ro" /home/container/download-tools.sif \
-  python3 -B /openneuro-scripts/test-download-openneuro-aws.py
-apptainer exec --bind "$PWD:/openneuro-scripts:ro" /home/container/download-tools.sif \
-  python3 -B /openneuro-scripts/test-download-openneuro-bootstrap.py
-```
-
-AWS 测试使用真实本地 git-annex 仓库和替代的传输命令，覆盖版本增删记录、对象去重、哈希拒绝、入库、缓存恢复和进程取消；不会下载真实 OpenNeuro 数据。

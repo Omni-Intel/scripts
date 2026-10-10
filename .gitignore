@@ -219,5 +219,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Local utility regression checks
+# Local regression checks
 /utils/tests/
+/openneuro/tests/
