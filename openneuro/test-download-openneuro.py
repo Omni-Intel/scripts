@@ -1,16 +1,16 @@
 """Container integration tests with synthetic annex data; no OpenNeuro downloads."""
-import json
+import importlib.util
 import io
+import json
+import subprocess
 import sys
-from contextlib import redirect_stdout
+import tempfile
 import threading
 import time
-from pathlib import Path
-import subprocess
-import tempfile
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
-import importlib.util
 
 _module_spec = importlib.util.spec_from_file_location(
     'openneuro_worker', Path(__file__).with_name('download-openneuro.py'))
@@ -100,6 +100,7 @@ class DownloadTests(unittest.TestCase):
             if args[0] == 'datalad':
                 raise subprocess.CalledProcessError(1, args)
             return self.fixture(args, cwd)
+
         with patch.object(worker, 'run', fail):
             with self.assertRaises(subprocess.CalledProcessError):
                 self.invoke()
@@ -110,10 +111,12 @@ class DownloadTests(unittest.TestCase):
 
     def interrupt_materialize(self):
         replace = worker.os.replace
+
         def interrupt(src, dst):
             replace(src, dst)
             if Path(dst).name in ('one', 'two'):
                 raise KeyboardInterrupt()
+
         with patch.object(worker.os, 'replace', interrupt):
             with self.assertRaises(KeyboardInterrupt):
                 self.invoke()
@@ -138,9 +141,11 @@ class DownloadTests(unittest.TestCase):
 
     def test_cleanup_resume_after_git_removed(self):
         remove = worker.remove_git
+
         def interrupt(path):
             remove(path)
             raise KeyboardInterrupt()
+
         with patch.object(worker, 'remove_git', interrupt):
             with self.assertRaises(KeyboardInterrupt):
                 self.invoke()
@@ -150,10 +155,12 @@ class DownloadTests(unittest.TestCase):
 
     def test_publish_resume_after_rename(self):
         write = worker.write_json
+
         def interrupt(path, value):
             if path.name == 'state.json' and value.get('phase') == 'complete':
                 raise KeyboardInterrupt()
             write(path, value)
+
         with patch.object(worker, 'write_json', interrupt):
             with self.assertRaises(KeyboardInterrupt):
                 self.invoke()
@@ -174,6 +181,7 @@ class DownloadTests(unittest.TestCase):
             if args[:3] == ['git', 'annex', 'fsck']:
                 raise subprocess.CalledProcessError(1, args)
             return self.fixture(args, cwd)
+
         with patch.object(worker, 'run', fail):
             with self.assertRaises(subprocess.CalledProcessError):
                 self.invoke()
@@ -187,6 +195,7 @@ class DownloadTests(unittest.TestCase):
             if args[0] == 'datalad':
                 raise subprocess.CalledProcessError(1, args)
             return self.fixture(args, cwd)
+
         with patch.object(worker, 'run', fail):
             with self.assertRaises(subprocess.CalledProcessError):
                 self.invoke()
@@ -214,6 +223,7 @@ class DownloadTests(unittest.TestCase):
             if args[:3] == ['git', 'annex', 'fsck']:
                 raise subprocess.CalledProcessError(1, args)
             return self.fixture(args, cwd)
+
         with patch.object(worker, 'run', fail), patch.object(worker, 'log') as logger:
             with self.assertRaises(subprocess.CalledProcessError):
                 self.invoke()
@@ -221,6 +231,7 @@ class DownloadTests(unittest.TestCase):
         self.assertFalse(any(event == 'DONE' and message.startswith('phase=verify ') for event, message in messages))
         self.assertTrue(any(event == 'FAILED' and 'phase=verify ' in message and 'resume_phase=get' in message
                             for event, message in messages))
+
     def test_datalad_backend_skips_aws(self):
         with patch.object(worker, 'aws_prefetch') as prefetch:
             worker.download('ds002721', self.root, 1, backend='datalad')
@@ -296,6 +307,7 @@ class InstalledCliTests(unittest.TestCase):
                 self.assertEqual((config / 'deno.lock').read_text(), 'original lock')
                 self.assertEqual(worker.writable_cli(str(launcher), cache, {'version': 'test'}), wrapper)
                 self.assertEqual((Path(wrapper).parent / 'config' / 'deno.lock').read_text(), 'updated lock')
+
     def test_missing_cli_has_no_network_fallback(self):
         with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(worker.shutil, 'which', return_value=None), \
@@ -304,6 +316,7 @@ class InstalledCliTests(unittest.TestCase):
                 worker.prepare_cli(Path(tmp))
             probe.assert_not_called()
 
+
 class DatasetParallelTests(unittest.TestCase):
     def test_parallel_limit_dedup_and_failure_isolation(self):
         guard = threading.Lock()
@@ -311,6 +324,7 @@ class DatasetParallelTests(unittest.TestCase):
         active = 0
         peak = 0
         calls = []
+
         def fake_download(spec, output, jobs, cli, backend, stop):
             nonlocal active, peak
             with guard:
@@ -326,13 +340,14 @@ class DatasetParallelTests(unittest.TestCase):
             finally:
                 with guard:
                     active -= 1
+
         with patch.object(worker, 'download', fake_download):
             failed = worker.download_batch(['ds000001', 'ds000002', 'ds000001', 'ds000003'],
                                            Path('/tmp'), 4, 2, 'openneuro')
         self.assertEqual(peak, 2)
         self.assertEqual(failed, ['ds000002'])
         self.assertEqual(sorted(calls), [(s, 4, 'openneuro') for s in
-                                       ['ds000001', 'ds000002', 'ds000003']])
+                                         ['ds000001', 'ds000002', 'ds000003']])
 
     def test_default_sequential_order_and_invalid_limit(self):
         with patch.object(worker, 'download') as download:
@@ -341,12 +356,14 @@ class DatasetParallelTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 worker.download_batch(['ds000001'], Path('/tmp'), 4, 0, 'openneuro')
 
+
 class LogOutputTests(unittest.TestCase):
     def test_command_output_is_tagged_and_errors_propagate(self):
         @worker.dataset_logging
         def command(spec):
             worker.run([sys.executable, '-c',
                         'import sys; print("hello", flush=True); print("problem", file=sys.stderr); sys.exit(3)'], Path('/tmp'))
+
         output = io.StringIO()
         with redirect_stdout(output), self.assertRaises(subprocess.CalledProcessError):
             command('ds000001')
@@ -355,6 +372,7 @@ class LogOutputTests(unittest.TestCase):
         self.assertTrue(any('[OUTPUT] hello' in line for line in lines))
         self.assertTrue(any('[OUTPUT] problem' in line for line in lines))
         self.assertRegex(lines[0], r'^\[\d{4}-\d{2}-\d{2}T')
+
 
 if __name__ == '__main__':
     unittest.main()

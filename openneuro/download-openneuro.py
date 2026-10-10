@@ -1,35 +1,34 @@
 """Resumable OpenNeuro downloader; run through download-openneuro.sh."""
 import argparse
-from contextlib import contextmanager
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import fcntl
-from datetime import datetime
-from decimal import Decimal
-from functools import wraps
-import threading
-import time
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shlex
-import signal
 import shutil
+import signal
 import subprocess
 import tempfile
+import threading
+import time
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
+from contextlib import contextmanager
+from datetime import datetime
+from decimal import Decimal
+from functools import wraps
+from pathlib import Path
 
 CLI = 'openneuro'
 AWS_ENDPOINT = 'https://s3.dualstack.us-east-1.amazonaws.com'
-AWS_CHUNK_SIZE = 32 * 1024**2
+AWS_CHUNK_SIZE = 32 * 1024 ** 2
 AWS_CHUNK_WORKERS = 4
 AWS_SLOW_WINDOW = 120
 AWS_MIN_RATE = 64 * 1024
 RECEIPT = '.openneuro-download.json'
 PHASES = ('resolve', 'clone', 'get', 'verify', 'materialize', 'cleanup', 'publish', 'complete')
-
 
 _LOG_CONTEXT = threading.local()
 _LOG_LOCK = threading.Lock()
@@ -53,6 +52,7 @@ def dataset_logging(function):
             return function(spec, *args, **kwargs)
         finally:
             _LOG_CONTEXT.spec = previous
+
     return wrapped
 
 
@@ -75,6 +75,7 @@ def run(args, cwd):
             raise
     if returncode:
         raise subprocess.CalledProcessError(returncode, args)
+
 
 def sync_dir(path):
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
@@ -367,6 +368,7 @@ def aws_manifest(dataset, accession):
 
 class DownloadStop:
     """Cancel one AWS pool, or inherit cancellation of the enclosing batch."""
+
     def __init__(self, parent=None):
         self.event = threading.Event()
         self.parent = parent
@@ -499,7 +501,7 @@ def aws_ranges(candidate, key, size, cache, partial, stop, slots):
                 if local_stop.is_set():
                     raise InterruptedError('AWS download cancelled')
                 with ordered[index].open('rb') as source:
-                    shutil.copyfileobj(source, target, 1024**2)
+                    shutil.copyfileobj(source, target, 1024 ** 2)
             target.flush()
             os.fsync(target.fileno())
     except BaseException:
@@ -586,11 +588,14 @@ def aws_prefetch(dataset, stage, accession, jobs, stop=None):
     stats = {'objects': len(items), 'eligible': len(eligible), 'downloaded': 0, 'downloaded_bytes': 0,
              'reused': 0, 'fallback': len(items) - len(eligible), 'imported': 0}
     log(f'eligible={len(eligible)} missing_objects={len(items)} jobs={jobs}', 'AWS_START')
-    ready = []; ready_bytes = 0
+    ready = [];
+    ready_bytes = 0
     pool = ThreadPoolExecutor(max_workers=jobs, thread_name_prefix='aws')
     slots = threading.BoundedSemaphore(jobs)
-    pending = {}; iterator = iter(eligible)
-    last_report = time.monotonic(); last_bytes = 0
+    pending = {};
+    iterator = iter(eligible)
+    last_report = time.monotonic();
+    last_bytes = 0
 
     def refill():
         while len(pending) < jobs and not stop.is_set():
@@ -604,7 +609,8 @@ def aws_prefetch(dataset, stage, accession, jobs, stop=None):
         if ready:
             run(['git', 'annex', 'reinject', '--guesskeys', *[str(cache / key) for key in ready]], dataset)
             stats['imported'] += len(ready)
-            ready.clear(); ready_bytes = 0
+            ready.clear();
+            ready_bytes = 0
 
     try:
         refill()
@@ -619,11 +625,12 @@ def aws_prefetch(dataset, stage, accession, jobs, stop=None):
                     stats['reused' if result['reused'] else 'downloaded'] += 1
                     if not result['reused']:
                         stats['downloaded_bytes'] += result['bytes']
-                    ready.append(result['key']); ready_bytes += result['bytes']
+                    ready.append(result['key']);
+                    ready_bytes += result['bytes']
                 else:
                     stats['fallback'] += 1
                     log(f"key={result['key']} errors={result['errors']}; deferred to DataLad", 'AWS_FALLBACK')
-            if len(ready) >= 32 or ready_bytes >= 1024**3:
+            if len(ready) >= 32 or ready_bytes >= 1024 ** 3:
                 inject()
             refill()
             now = time.monotonic()
@@ -650,7 +657,7 @@ def aws_prefetch(dataset, stage, accession, jobs, stop=None):
                 total = stats['downloaded_bytes'] + partial_bytes
                 log(f'downloaded={stats["downloaded"]} reused={stats["reused"]} '
                     f'fallback={stats["fallback"]} net_bytes={total} '
-                    f'net_MiB_s={(total - last_bytes) / (now - last_report) / 1024**2:.3f}', 'AWS_PROGRESS')
+                    f'net_MiB_s={(total - last_bytes) / (now - last_report) / 1024 ** 2:.3f}', 'AWS_PROGRESS')
                 write_json(stage / 'aws-summary.json', dict(stats, elapsed=now - started, complete=False))
                 last_report, last_bytes = now, total
         inject()
@@ -663,6 +670,7 @@ def aws_prefetch(dataset, stage, accession, jobs, stop=None):
     log(f'downloaded={stats["downloaded"]} reused={stats["reused"]} '
         f'imported={stats["imported"]} fallback={stats["fallback"]} '
         f'elapsed={time.monotonic() - started:.1f}s; starting DataLad completion', 'AWS_DONE')
+
 
 @dataset_logging
 def download(spec, output, jobs, cli=CLI, backend="aws", stop=None):
@@ -763,7 +771,7 @@ def download(spec, output, jobs, cli=CLI, backend="aws", stop=None):
                 validate_export(dataset, manifest)
                 remove_git(dataset / '.git')
                 write_json(dataset / RECEIPT, {k: state[k] for k in
-                           ('schema', 'spec', 'endpoint', 'version', 'commit', 'run_id')})
+                                               ('schema', 'spec', 'endpoint', 'version', 'commit', 'run_id')})
                 phase('publish')
             if state['phase'] == 'publish':
                 if os.path.lexists(destination):
@@ -855,6 +863,7 @@ def writable_cli(executable, cache, identity):
     os.environ['PATH'] = str(runtime) + os.pathsep + os.environ['PATH']
     return str(wrapper)
 
+
 def prepare_cli(output):
     """Use the installed Deno launcher, just like the annex special remote."""
     executable = shutil.which(CLI)
@@ -885,6 +894,7 @@ def prepare_cli(output):
     log(f'OpenNeuro CLI: {version} ({executable})')
     return runtime_cli
 
+
 def download_batch(specs, output, jobs, dataset_jobs, cli, backend="aws"):
     """Bound the number of active dataset pipelines; each keeps its own state/lock."""
     if dataset_jobs < 1 or jobs < 1:
@@ -910,6 +920,7 @@ def download_batch(specs, output, jobs, dataset_jobs, cli, backend="aws"):
         # Do not start queued datasets after an interrupt/unexpected exception.
         pool.shutdown(wait=True, cancel_futures=True)
     return [spec for spec in specs if spec in failed]
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

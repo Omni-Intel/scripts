@@ -1,9 +1,9 @@
 """Bash bootstrap tests using a fake runtime; no network or real downloads."""
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 RUNTIME = r'''#!/usr/bin/python3
 import os, pathlib, subprocess, sys

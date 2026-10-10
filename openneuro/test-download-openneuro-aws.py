@@ -3,13 +3,13 @@ import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('worker', Path(__file__).with_name('download-openneuro.py'))
@@ -30,8 +30,8 @@ class MetadataTests(unittest.TestCase):
 
     def test_remote_selection_is_public_aws_only(self):
         text = '\n'.join([f'{UUID} type=S3 bucket=openneuro.org host=s3.amazonaws.com',
-                           'private type=S3 bucket=openneuro-private host=s3.amazonaws.com',
-                           'gcs type=S3 bucket=openneuro.org host=storage.googleapis.com'])
+                          'private type=S3 bucket=openneuro-private host=s3.amazonaws.com',
+                          'gcs type=S3 bucket=openneuro.org host=storage.googleapis.com'])
         self.assertEqual(worker.s3_remotes(text), {UUID})
 
     def test_version_removals_precision_and_prefix(self):
@@ -42,7 +42,7 @@ class MetadataTests(unittest.TestCase):
 4s other:V +no#ds000001/a
 '''
         self.assertEqual(worker.s3_versions(text, {UUID}, 'ds000001'),
-                         [{'version_id':'new','s3_key':'ds000001/b'}, {'version_id':'good','s3_key':'ds000001/a'}])
+                         [{'version_id': 'new', 's3_key': 'ds000001/b'}, {'version_id': 'good', 's3_key': 'ds000001/a'}])
 
     def test_dataset_cancellation_does_not_cancel_other_datasets(self):
         parent = threading.Event()
@@ -72,8 +72,10 @@ class PrefetchTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.repo = self.root / 'repo'; self.repo.mkdir()
-        self.stage = self.root / 'stage'; self.stage.mkdir()
+        self.repo = self.root / 'repo';
+        self.repo.mkdir()
+        self.stage = self.root / 'stage';
+        self.stage.mkdir()
         self.payload = b'aws payload\n' * 1024
         self.env = dict(os.environ, GIT_AUTHOR_NAME='Test', GIT_AUTHOR_EMAIL='test@example.invalid',
                         GIT_COMMITTER_NAME='Test', GIT_COMMITTER_EMAIL='test@example.invalid')
@@ -86,10 +88,12 @@ class PrefetchTests(unittest.TestCase):
         self.key = Path(os.readlink(self.repo / 'a.dat')).name
         self.git('annex', 'drop', '--force', 'a.dat', 'b.dat')
         self.cache = self.stage / 'aws-cache'
-        self.cache.mkdir(); (self.cache / 'partial').mkdir()
+        self.cache.mkdir();
+        (self.cache / 'partial').mkdir()
         self.add_metadata()
         self.which = patch.object(worker.shutil, 'which', return_value='/fake/aws')
-        self.which.start(); self.addCleanup(self.which.stop)
+        self.which.start();
+        self.addCleanup(self.which.stop)
 
     def git(self, *args, input=None, env=None):
         return subprocess.check_output(['git', *args], cwd=self.repo, env=env or self.env,
@@ -98,8 +102,8 @@ class PrefetchTests(unittest.TestCase):
     def add_metadata(self):
         env = dict(self.env, GIT_INDEX_FILE=str(self.root / 'metadata-index'))
         self.git('read-tree', 'git-annex', env=env)
-        values = {'remote.log':f'{UUID} type=S3 bucket=openneuro.org host=s3.amazonaws.com autoenable=false name=s3-PUBLIC encryption=none\n',
-                  self.key + '.log.rmet':f'1s {UUID}:V +historical#ds000001/a.dat\n'}
+        values = {'remote.log': f'{UUID} type=S3 bucket=openneuro.org host=s3.amazonaws.com autoenable=false name=s3-PUBLIC encryption=none\n',
+                  self.key + '.log.rmet': f'1s {UUID}:V +historical#ds000001/a.dat\n'}
         for name, text in values.items():
             blob = self.git('hash-object', '-w', '--stdin', input=text)
             self.git('update-index', '--add', '--cacheinfo', '100644', blob, name, env=env)
@@ -116,7 +120,7 @@ class PrefetchTests(unittest.TestCase):
         items = worker.aws_manifest(self.repo, 'ds000001')
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]['key'], self.key)
-        self.assertEqual(items[0]['candidates'], [{'version_id':'historical','s3_key':'ds000001/a.dat'}])
+        self.assertEqual(items[0]['candidates'], [{'version_id': 'historical', 's3_key': 'ds000001/a.dat'}])
 
     def test_download_import_and_skip_on_resume(self):
         with patch.object(worker, 'aws_command', self.fake_aws):
@@ -142,9 +146,11 @@ class PrefetchTests(unittest.TestCase):
 
     def test_full_partial_recovers_after_interruption(self):
         item = worker.aws_manifest(self.repo, 'ds000001')[0]
+
         def interrupted(args, cwd, stop):
             Path(args[-1]).write_bytes(self.payload)
             raise InterruptedError('interrupted after transfer')
+
         with patch.object(worker, 'aws_command', interrupted), self.assertRaises(InterruptedError):
             worker.aws_fetch(item, self.cache, threading.Event())
         with patch.object(worker, 'aws_command') as download:
@@ -155,6 +161,7 @@ class PrefetchTests(unittest.TestCase):
     def test_mismatch_never_imports(self):
         def wrong(args, cwd, stop):
             Path(args[-1]).write_bytes(b'wrong')
+
         with patch.object(worker, 'aws_command', wrong):
             worker.aws_prefetch(self.repo, self.stage, 'ds000001', 1)
         self.assertFalse((self.repo / 'a.dat').exists())
@@ -177,7 +184,8 @@ class PrefetchTests(unittest.TestCase):
         self.assertEqual(json.loads((self.stage / 'aws-summary.json').read_text())['fallback'], 1)
 
     def test_symlink_cache_rejected(self):
-        outside = self.root / 'outside'; outside.write_bytes(b'preserve')
+        outside = self.root / 'outside';
+        outside.write_bytes(b'preserve')
         (self.cache / self.key).symlink_to(outside)
         item = worker.aws_manifest(self.repo, 'ds000001')[0]
         with self.assertRaisesRegex(RuntimeError, 'symlink'):
@@ -197,7 +205,8 @@ class RangeTests(unittest.TestCase):
         self.item = {'key': self.key, 'candidates': [self.candidate]}
         self.calls = []
         p = patch.object(worker, 'AWS_CHUNK_SIZE', 32)
-        p.start(); self.addCleanup(p.stop)
+        p.start();
+        self.addCleanup(p.stop)
 
     def transfer(self, args, cwd, stop):
         self.assertEqual(args[args.index('--endpoint-url') + 1],
@@ -211,14 +220,14 @@ class RangeTests(unittest.TestCase):
         with patch.object(worker, 'aws_command', self.transfer):
             result = worker.aws_fetch(self.item, self.cache, threading.Event())
         self.assertTrue(result['ok'])
-        self.assertEqual(sorted(self.calls), [(0,31),(32,63),(64,95),(96,99)])
+        self.assertEqual(sorted(self.calls), [(0, 31), (32, 63), (64, 95), (96, 99)])
         self.assertEqual((self.cache / self.key).read_bytes(), self.payload)
         self.assertFalse((self.cache / 'chunks' / self.key).exists())
 
     def seed(self):
         parts = worker.aws_parts_dir(self.cache, self.key, self.candidate)
         parts.mkdir(parents=True, exist_ok=True)
-        for start, end in [(0,31),(32,63),(64,95)]:
+        for start, end in [(0, 31), (32, 63), (64, 95)]:
             data = self.payload[start:end + 1]
             (parts / f'{start}-{end}.part').write_bytes(data)
             (parts / f'{start}-{end}.json').write_text(
@@ -230,14 +239,14 @@ class RangeTests(unittest.TestCase):
         with patch.object(worker, 'aws_command', self.transfer):
             result = worker.aws_fetch(self.item, self.cache, threading.Event())
         self.assertTrue(result['ok'])
-        self.assertEqual(self.calls, [(96,99)])
+        self.assertEqual(self.calls, [(96, 99)])
 
     def test_corrupt_cached_chunk_is_redownloaded(self):
         parts = self.seed()
         (parts / '32-63.part').write_bytes(b'x' * 32)
         with patch.object(worker, 'aws_command', self.transfer):
             self.assertTrue(worker.aws_fetch(self.item, self.cache, threading.Event())['ok'])
-        self.assertEqual(sorted(self.calls), [(32,63),(96,99)])
+        self.assertEqual(sorted(self.calls), [(32, 63), (96, 99)])
 
     def test_versions_do_not_share_ranges(self):
         self.seed()
@@ -252,22 +261,25 @@ class RangeTests(unittest.TestCase):
             self.assertFalse(worker.aws_fetch(self.item, self.cache, threading.Event())['ok'])
         with patch.object(worker, 'aws_command', self.transfer):
             self.assertTrue(worker.aws_fetch(self.item, self.cache, threading.Event())['ok'])
-        self.assertEqual(self.calls, [(96,99)])
+        self.assertEqual(self.calls, [(96, 99)])
 
     def test_connection_limit(self):
         active = 0
         peak = 0
         lock = threading.Lock()
+
         def transfer(args, cwd, stop):
             nonlocal active, peak
             with lock:
-                active += 1; peak = max(peak, active)
+                active += 1;
+                peak = max(peak, active)
             try:
                 time.sleep(0.02)
                 self.transfer(args, cwd, stop)
             finally:
                 with lock:
                     active -= 1
+
         with patch.object(worker, 'aws_command', transfer):
             result = worker.aws_fetch(self.item, self.cache, threading.Event(),
                                       threading.BoundedSemaphore(2))
@@ -277,7 +289,9 @@ class RangeTests(unittest.TestCase):
     def test_wrong_range_payload_never_imports(self):
         def corrupt(args, cwd, stop):
             self.transfer(args, cwd, stop)
-            p = Path(args[-1]); p.write_bytes(b'x' * p.stat().st_size)
+            p = Path(args[-1]);
+            p.write_bytes(b'x' * p.stat().st_size)
+
         with patch.object(worker, 'aws_command', corrupt):
             result = worker.aws_fetch(self.item, self.cache, threading.Event())
         self.assertFalse(result['ok'])
@@ -291,6 +305,7 @@ class RangeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'throughput'):
                 worker.aws_command(args, self.cache, threading.Event())
         self.assertLess(time.monotonic() - started, 6)
+
 
 if __name__ == '__main__':
     unittest.main()
