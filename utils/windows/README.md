@@ -6,31 +6,30 @@ The script does not set account passwords, add administrators, or change network
 
 ## Download and run
 
-Replace the example controller and seat addresses and account name with your deployment values. The seat address must belong to the computer executing the script. Run these commands locally on the seat, not on the controller.
+Run locally on the seat in **administrator Windows PowerShell**, using the existing local administrator account that should receive remote access. Only the controller address needs to be supplied. The script automatically selects the local IPv4 source address Windows would use to reach that controller, and resolves the current process account by its local user SID. It prints the selected address and account before configuration changes.
+
+### One line
+
+Replace the example controller IP `192.0.2.1`. This example explicitly allows full remote tokens for local administrators (`-LocalAdmin`), a machine-wide UAC remote-access setting.
 
 ```powershell
-$ErrorActionPreference = 'Stop'
-$url = 'https://raw.githubusercontent.com/Omni-Intel/scripts/main/utils/windows/bootstrap-winrm.ps1'
-$expectedHash = '3EEB4CFA8E538EBD7E35641B9A19CB9B139038F5828EE3BA61E340CEC2BC1718'
-$scriptFile = Join-Path $env:TEMP 'bootstrap-winrm.ps1'
-Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $scriptFile
-if ((Get-FileHash -LiteralPath $scriptFile -Algorithm SHA256).Hash -ne $expectedHash) {
-    throw 'Bootstrap checksum mismatch. Obtain the hash for the intended release before running it.'
-}
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptFile `
-    -ControllerAddress 192.0.2.1 -SeatAddress 192.0.2.10 -LoginUser labuser
+$f="$env:TEMP\bootstrap-winrm.ps1"; iwr -UseBasicParsing 'https://raw.githubusercontent.com/Omni-Intel/scripts/main/utils/windows/bootstrap-winrm.ps1' -OutFile $f -ErrorAction Stop; if((Get-FileHash $f).Hash -ne 'BC8CA23F472756F24C3D595AE0CFDCFFED754402F2BE06207AF1F44A9409328D'){throw 'Bootstrap checksum mismatch'}; powershell -NoProfile -ExecutionPolicy Bypass -File $f -Controller 192.0.2.1 -LocalAdmin
 ```
 
-The hash pins the reviewed script bytes. When the script changes, obtain the intended version's hash through a trusted channel. For reproducible deployment, replace `main` in the URL with the desired commit SHA. Process execution policy does not override organization-enforced Group Policy.
+Omit `-LocalAdmin` if the existing remote-access policy must be preserved. No password is supplied to the script; passwords are configured separately and entered on the Ansible controller.
+
+If address selection fails or the desired account differs from the elevated process account, supply `-SeatAddress` and `-LoginUser` explicitly. Elevating with a different account selects that account, not necessarily the desktop's signed-in user. Domain or Microsoft identities that cannot be resolved to an existing local administrator require an explicit local `-LoginUser`.
+
+The hash pins the reviewed script bytes. When the script changes, obtain the intended version's hash through a trusted channel. For reproducible deployment, replace `main` in the URL with the desired commit SHA. Process execution policy does not override organization-enforced Group Policy. GitHub Raw must be reachable from the seat.
 
 ## Parameters and privileges
 
 | Parameter | Purpose |
 | --- | --- |
-| `ControllerAddress` | Required controller IP permitted by the configured firewall rules |
-| `SeatAddress` | Required local seat IP included in the certificate SAN |
-| `LoginUser` | Existing local administrator account; defaults to the current username |
-| `AllowLocalAdminRemoteToken` | Explicitly set `LocalAccountTokenFilterPolicy=1` for local administrator remote access |
+| `ControllerAddress` / `Controller` | Required controller IP permitted by the configured firewall rules |
+| `SeatAddress` / `Seat` | Optional local IP override; otherwise selected from the route to the controller |
+| `LoginUser` / `User` | Optional existing local administrator override; otherwise resolved from the elevated process SID |
+| `AllowLocalAdminRemoteToken` / `LocalAdmin` | Explicitly set `LocalAccountTokenFilterPolicy=1` for local administrator remote access |
 
 If local administrator authentication is blocked by UAC remote token filtering, append `-AllowLocalAdminRemoteToken` after evaluating the machine-wide policy change. `Enable-PSRemoting` itself may alter this policy. Without the switch, the script restores the value captured at startup on successful completion; errors may leave partial changes.
 

@@ -10,14 +10,40 @@ Without -AllowLocalAdminRemoteToken, restore its value captured at script start.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
+    [Alias('Controller')]
     [System.Net.IPAddress]$ControllerAddress,
-    [Parameter(Mandatory = $true)]
+    [Alias('Seat')]
     [System.Net.IPAddress]$SeatAddress,
-    [string]$LoginUser = $env:USERNAME,
+    [Alias('User')]
+    [string]$LoginUser,
+    [Alias('LocalAdmin')]
     [switch]$AllowLocalAdminRemoteToken
 )
 $ErrorActionPreference = 'Stop'
+function Resolve-SeatAddress {
+    param([System.Net.IPAddress]$Controller)
+    $addresses = @(Find-NetRoute -RemoteIPAddress $Controller.IPAddressToString |
+        Where-Object { $_.IPAddress -and $_.AddressFamily -eq 'IPv4' -and $_.AddressState -eq 'Preferred' } |
+        Select-Object -ExpandProperty IPAddress -Unique)
+    if ($addresses.Count -ne 1) {
+        throw 'Cannot uniquely identify the local IPv4 address used to reach the controller. Supply -SeatAddress explicitly.'
+    }
+    $address = [System.Net.IPAddress]::Parse($addresses[0])
+    if ([System.Net.IPAddress]::IsLoopback($address) -or $address.IPAddressToString.StartsWith('169.254.')) {
+        throw 'The selected local address is loopback or link-local. Supply -SeatAddress explicitly.'
+    }
+    return $address
+}
 # Check prerequisites before changing WinRM or firewall configuration.
+if ($null -eq $SeatAddress) {
+    $SeatAddress = Resolve-SeatAddress -Controller $ControllerAddress
+}
+if ([string]::IsNullOrWhiteSpace($LoginUser)) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $currentLocalUser = Get-LocalUser -SID $identity.User
+    $LoginUser = $currentLocalUser.Name
+}
+Write-Host "Detected seat: $SeatAddress; login: $env:COMPUTERNAME\$LoginUser"
 if (-not (Get-NetIPAddress -IPAddress $SeatAddress.IPAddressToString -ErrorAction SilentlyContinue)) {
     throw 'SeatAddress must be an IP address assigned to this computer.'
 }
@@ -44,7 +70,7 @@ $oldPolicy = Get-ItemProperty -LiteralPath $policyPath
 } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (
     Join-Path $root ('before-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json')) -Encoding UTF8
 
-Write-Host 'Windows WinRM HTTPS bootstrap 1.0.0'
+Write-Host 'Windows WinRM HTTPS bootstrap 1.1.0'
 Enable-PSRemoting -SkipNetworkProfileCheck -Force
 Get-NetFirewallRule -Name 'WINRM-HTTP-In-TCP*' -ErrorAction SilentlyContinue |
     Set-NetFirewallRule -RemoteAddress $ControllerAddress.IPAddressToString | Out-Null
@@ -140,6 +166,7 @@ Export-Certificate -Cert $cert -FilePath $certFile -Force | Out-Null
 [pscustomobject]@{
     ComputerName = $env:COMPUTERNAME
     Login = "$env:COMPUTERNAME\$LoginUser"
+    SeatAddress = $SeatAddress.IPAddressToString
     ControllerAllowed = $ControllerAddress.IPAddressToString
     CertificateFile = $certFile
     CertificateSHA256 = (Get-FileHash -LiteralPath $certFile -Algorithm SHA256).Hash
